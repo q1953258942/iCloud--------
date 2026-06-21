@@ -866,3 +866,32 @@ DELETE /api/v1/mailboxes/{id}
 - `register_config.example.json`
 - 本设计文档
 
+## 19. 当前独立平台已实现项
+
+本独立项目已从“只导入已有邮箱”推进到协议创建阶段：
+
+1. 前端新增 `iCloud 协议登录态` 面板。
+2. 支持调用比特浏览器本地 API 打开 iCloud 登录窗口。
+3. 支持用户手动登录后，通过 CDP 读取当前窗口 Cookie，并在页面上下文调用 `setup/ws/1/validate` 校验登录态。
+4. 登录态只保存到本机 `data/state.json`，不返回 Cookie/Session 原文到前端。
+5. 支持协议创建隐私邮箱：
+   - `POST /v1/hme/generate`
+   - `POST /v1/hme/reserve`
+6. 创建成功后自动写入本地邮箱列表，并生成对外取码 API 地址。
+
+当前已继续实现：
+
+1. 保存登录态时同时记录 `premiummailsettings`、`mccgateway`、`mail` 服务地址。
+2. 支持调用 iCloud Mail `mccgateway` 邮件接口同步收件箱/分类文件夹最近线程。
+3. 同步时按隐私邮箱别名匹配收件人，只把包含 OTP 的邮件落库。
+4. 对外取码接口会先同步再查本地邮件，避免只依赖手动导入。
+5. 支持 `POST /api/mailboxes/{id}/sync` 手动同步邮件。
+6. 支持 `GET /api/v1/health` 和 `POST /api/v1/mailboxes/claim` 给外部系统检查/自动取号。
+7. 支持 `admin_key` 保护管理接口，保留单邮箱 key 和全局 `api_key` 作为对外取码鉴权。
+
+当前仍未实现：
+
+1. 自动登录 Apple ID。
+2. 自动处理 2FA。
+3. 批量创建队列。
+4. 主注册项目里的 `icloud_api` 邮箱来源接入。

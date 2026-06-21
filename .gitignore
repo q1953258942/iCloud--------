@@ -9,6 +9,9 @@ dist/
 # Runtime data
 data/
 logs/
+captures/
+.anna_manifest_tmp.json
+.anna_skills/
 *.db
 *.sqlite
 *.sqlite3
@@ -30,4 +33,3 @@ coverage.out
 .vs/
 Thumbs.db
 Desktop.ini
-

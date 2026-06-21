@@ -17,7 +17,7 @@
     .panel h2 { margin: 0; padding: 16px 18px; border-bottom: 1px solid #075638; }
     .toolbar, .form { display: flex; flex-wrap: wrap; gap: 10px; padding: 14px 18px; align-items: end; }
     label { display: flex; flex-direction: column; gap: 6px; color: #a7cdb7; font-size: 13px; }
-    input, textarea { background: #010806; color: #effff5; border: 1px solid #0b6b45; border-radius: 8px; padding: 10px 11px; min-width: 180px; }
+    input, textarea, select { background: #010806; color: #effff5; border: 1px solid #0b6b45; border-radius: 8px; padding: 10px 11px; min-width: 180px; }
     textarea { min-width: 360px; min-height: 74px; }
     button { background: #073b29; color: #d9fbe8; border: 1px solid #0b7d51; border-radius: 8px; padding: 10px 13px; cursor: pointer; }
     button.primary { background: #29d985; color: #00160d; border-color: #29d985; font-weight: 700; }
@@ -27,6 +27,7 @@
     th { color: #8fc7aa; font-weight: 600; }
     .pill { display: inline-block; border: 1px solid #0b7d51; border-radius: 999px; padding: 3px 9px; color: #39e58b; }
     .muted { color: #7fa28e; }
+    .notice { color: #bff7d4; padding: 0 18px 14px; line-height: 1.7; }
     .log { background: #010806; border-top: 1px solid #063e2a; padding: 14px 18px; white-space: pre-wrap; min-height: 80px; color: #c4ffe0; }
     @media (max-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } table { font-size: 12px; } }
   </style>
@@ -45,12 +46,40 @@
     </section>
 
     <section class="panel">
+      <h2>服务配置</h2>
+      <div class="notice" id="serviceInfo">未刷新服务状态。</div>
+      <div class="form">
+        <label>Admin Key<input id="adminKey" type="password" placeholder="管理接口启用时填写；只保存到本机浏览器"></label>
+        <button onclick="saveAdminKey()">保存 Admin Key</button>
+        <button onclick="clearAdminKey()">清空 Admin Key</button>
+        <button onclick="refresh()">刷新状态</button>
+      </div>
+    </section>
+
+    <section class="panel">
       <h2>iCloud 账号</h2>
       <div class="form">
         <label>标签<input id="accountLabel" placeholder="UPI-70"></label>
         <label>Apple ID<input id="appleId" placeholder="只本地保存，可留空"></label>
         <label>备注<input id="accountNote" placeholder="备注"></label>
         <button class="primary" onclick="createAccount()">保存账号</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>iCloud 协议登录态</h2>
+      <div class="notice" id="icloudSessionInfo">未保存登录态。点击打开登录窗口，手动登录完成后保存登录态。</div>
+      <div class="form">
+        <label>比特浏览器 ID<input id="browserId" placeholder="可留空，自动新建窗口"></label>
+        <label>CDP HTTP<input id="cdpHttp" placeholder="自动填入，如 127.0.0.1:55240"></label>
+        <button onclick="openICloudLogin()">打开登录窗口</button>
+        <button class="primary" onclick="saveICloudSession()">保存登录态</button>
+      </div>
+      <div class="form">
+        <label>账号 ID<input id="protoAccountId" placeholder="可留空"></label>
+        <label>标签<input id="protoLabel" placeholder="UPI-70-13"></label>
+        <label>备注<input id="protoNote" placeholder="选填"></label>
+        <button class="primary" onclick="createICloudMailbox()">协议创建邮箱</button>
       </div>
     </section>
 
@@ -90,15 +119,24 @@
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
+    const adminKeyStorage = 'ipm_admin_key';
     let lastMailboxes = [];
 
     async function api(path, options = {}) {
+      const headers = {'content-type': 'application/json', ...(options.headers || {})};
+      const key = currentAdminKey();
+      if (key) headers['X-Admin-Key'] = key;
       const res = await fetch(path, {
         ...options,
-        headers: {'content-type': 'application/json', ...(options.headers || {})}
+        headers
       });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.message || data.code || 'request failed');
+      let data;
+      try {
+        data = await res.json();
+      } catch (err) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+      if (!data.success) throw new Error(data.message || data.code || `HTTP ${res.status}`);
       return data;
     }
 
@@ -106,12 +144,39 @@
       $('log').textContent = new Date().toLocaleTimeString() + ' ' + text + '\n' + $('log').textContent;
     }
 
+    function currentAdminKey() {
+      const input = $('adminKey');
+      return (input ? input.value.trim() : '') || localStorage.getItem(adminKeyStorage) || '';
+    }
+
+    function saveAdminKey() {
+      const key = $('adminKey').value.trim();
+      if (key) {
+        localStorage.setItem(adminKeyStorage, key);
+        log('Admin Key 已保存到本机浏览器');
+      } else {
+        localStorage.removeItem(adminKeyStorage);
+        log('Admin Key 已清空');
+      }
+    }
+
+    function clearAdminKey() {
+      $('adminKey').value = '';
+      localStorage.removeItem(adminKeyStorage);
+      log('Admin Key 已清空');
+    }
+
     async function refresh() {
       const [status, boxes] = await Promise.all([api('/api/status'), api('/api/mailboxes')]);
       $('accountCount').textContent = status.accounts;
       $('mailboxCount').textContent = status.mailboxes;
       $('messageCount').textContent = status.messages;
-      $('apiStatus').textContent = status.api_key_configured ? 'global key' : 'per-mailbox';
+      $('apiStatus').textContent = status.admin_key_required ? 'admin key' : (status.api_key_configured ? 'global key' : 'per-mailbox');
+      $('serviceInfo').textContent =
+        `对外取码：${status.api_key_configured ? '支持全局 key + 单邮箱 key' : '仅单邮箱 key'}；` +
+        `管理接口：${status.admin_key_required ? '需要 Admin Key' : '未启用 Admin Key'}；` +
+        `Base URL：${status.base_url || '-'}`;
+      renderICloudSession(status.icloud_session);
       lastMailboxes = boxes.mailboxes || [];
       $('mailboxes').innerHTML = lastMailboxes.map(row => `
         <tr>
@@ -123,11 +188,36 @@
           <td>
             <button onclick="copyAPI('${row.id}')">API 地址</button>
             <button onclick="verifyMailbox('${row.id}')">验证码</button>
+            <button onclick="syncMailbox('${row.id}')">同步邮件</button>
+            <select onchange="setMailboxStatus('${row.id}', this.value)">
+              <option value="">改状态</option>
+              <option value="available">可用</option>
+              <option value="used">已使用</option>
+              <option value="failed">失败</option>
+              <option value="disabled">停用</option>
+            </select>
             <button onclick="disableMailbox('${row.id}')">停用 API</button>
             <button class="danger" onclick="deleteMailbox('${row.id}')">删除 API</button>
           </td>
         </tr>
       `).join('');
+    }
+
+    function renderICloudSession(session) {
+      if (!session || !session.saved) {
+        $('icloudSessionInfo').textContent = '未保存登录态。点击“打开登录窗口”，手动登录 iCloud 后再点“保存登录态”。';
+        return;
+      }
+      const flags = [
+        session.is_icloud_plus ? 'iCloud+ active' : '无 iCloud+',
+        session.can_create_hme ? '可创建隐私邮箱' : '不可创建隐私邮箱',
+        `Cookie ${session.cookie_count || 0}`
+      ].join(' / ');
+      $('icloudSessionInfo').textContent =
+        `已保存：${session.apple_id || '-'}，DSID=${session.dsid_mask || '-'}，${flags}\n` +
+        `HME：${session.premium_mail_base_url || '-'}\n` +
+        `邮件网关：${session.mail_gateway_base_url || '-'}，Mail：${session.mail_base_url || '-'}\n` +
+        `构建：${session.client_build_number || '-'}，保存时间：${session.saved_at || '-'}`;
     }
 
     async function createAccount() {
@@ -151,6 +241,36 @@
       await refresh();
     }
 
+    async function openICloudLogin() {
+      const data = await api('/api/icloud/browser/open', {method:'POST', body: JSON.stringify({
+        browser_id: $('browserId').value.trim()
+      })});
+      $('browserId').value = data.browser_id || $('browserId').value;
+      $('cdpHttp').value = data.cdp_http || $('cdpHttp').value;
+      log('已打开 iCloud 登录窗口；登录完成后点击保存登录态');
+    }
+
+    async function saveICloudSession() {
+      const data = await api('/api/icloud/session/save', {method:'POST', body: JSON.stringify({
+        browser_id: $('browserId').value.trim(),
+        cdp_http: $('cdpHttp').value.trim()
+      })});
+      renderICloudSession(data.session);
+      log('iCloud 登录态已保存：' + (data.session.apple_id || '-'));
+      await refresh();
+    }
+
+    async function createICloudMailbox() {
+      const data = await api('/api/icloud/mailboxes/create', {method:'POST', body: JSON.stringify({
+        account_id: $('protoAccountId').value.trim(),
+        label: $('protoLabel').value.trim(),
+        note: $('protoNote').value.trim()
+      })});
+      $('msgMailboxId').value = data.mailbox.id;
+      log('协议创建邮箱成功：' + data.mailbox.email);
+      await refresh();
+    }
+
     async function verifyMailbox(id) {
       const row = lastMailboxes.find(x => x.id === id);
       if (!row) return;
@@ -163,6 +283,24 @@
       } catch (err) {
         log('取码失败：' + err.message);
       }
+    }
+
+    async function syncMailbox(id) {
+      const row = lastMailboxes.find(x => x.id === id);
+      log('开始同步邮件：' + (row ? row.email : id));
+      const data = await api(`/api/mailboxes/${encodeURIComponent(id)}/sync?keyword=OpenAI`, {method:'POST', body:'{}'});
+      log(`同步完成：${row ? row.email : id}，新增 ${data.synced || 0} 封验证码邮件`);
+      await refresh();
+    }
+
+    async function setMailboxStatus(id, status) {
+      if (!status) return;
+      const apiActive = status === 'disabled' ? false : undefined;
+      const payload = {status, note: '面板手动改状态'};
+      if (apiActive !== undefined) payload.api_active = apiActive;
+      await api(`/api/mailboxes/${encodeURIComponent(id)}/status`, {method:'POST', body: JSON.stringify(payload)});
+      log(`状态已更新：${id} -> ${status}`);
+      await refresh();
     }
 
     async function disableMailbox(id) {
@@ -205,8 +343,8 @@
       return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
 
+    $('adminKey').value = localStorage.getItem(adminKeyStorage) || '';
     refresh().catch(err => log('刷新失败：' + err.message));
   </script>
 </body>
 </html>
-

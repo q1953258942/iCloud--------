@@ -29,11 +29,15 @@ func main() {
 		logger.Error("load config", "err", err)
 		os.Exit(1)
 	}
-	cfg.Host = firstNonEmpty(*host, cfg.Host)
-	if *port != 0 {
+	if flagWasSet("host") {
+		cfg.Host = firstNonEmpty(*host, cfg.Host)
+	}
+	if flagWasSet("port") && *port != 0 {
 		cfg.Port = *port
 	}
-	cfg.DataPath = firstNonEmpty(*dataPath, cfg.DataPath)
+	if flagWasSet("data") {
+		cfg.DataPath = firstNonEmpty(*dataPath, cfg.DataPath)
+	}
 
 	store, err := app.NewFileStore(cfg.DataPath)
 	if err != nil {
@@ -66,6 +70,16 @@ func main() {
 		logger.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+func flagWasSet(name string) bool {
+	seen := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			seen = true
+		}
+	})
+	return seen
 }
 
 func firstNonEmpty(values ...string) string {

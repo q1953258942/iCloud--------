@@ -117,6 +117,45 @@ func (s *FileStore) AddMailbox(accountID, label, email string) (Mailbox, error) 
 	return mailbox, s.saveLocked()
 }
 
+func (s *FileStore) ClaimAvailableMailbox(note string) (Mailbox, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, mailbox := range s.state.Mailboxes {
+		if !mailbox.APIActive || !mailbox.ICloudActive || mailbox.Status != StatusAvailable {
+			continue
+		}
+		s.state.Mailboxes[i].Status = StatusUsed
+		if strings.TrimSpace(note) != "" {
+			s.state.Mailboxes[i].Note = strings.TrimSpace(note)
+		}
+		s.state.Mailboxes[i].UpdatedAt = time.Now()
+		return s.state.Mailboxes[i], s.saveLocked()
+	}
+	return Mailbox{}, errCode("no_available_mailbox", "没有可用隐私邮箱", false)
+}
+
+func (s *FileStore) SaveICloudSession(session ICloudSession) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if session.SavedAt.IsZero() {
+		session.SavedAt = time.Now()
+	}
+	s.state.ICloudSession = &session
+	return s.saveLocked()
+}
+
+func (s *FileStore) ICloudSession() (ICloudSession, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.state.ICloudSession == nil {
+		return ICloudSession{}, false
+	}
+	return cloneICloudSession(*s.state.ICloudSession), true
+}
+
 func (s *FileStore) AddMessage(mailboxID, subject, from, body string, receivedAt time.Time) (Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -141,6 +180,51 @@ func (s *FileStore) AddMessage(mailboxID, subject, from, body string, receivedAt
 	s.state.Mailboxes[idx].ReceiveCount++
 	s.state.Mailboxes[idx].UpdatedAt = time.Now()
 	return msg, s.saveLocked()
+}
+
+func (s *FileStore) UpsertMessage(mailboxID, remoteID, source, subject, from, body string, receivedAt time.Time) (Message, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.mailboxIndexLocked(mailboxID)
+	if idx < 0 {
+		return Message{}, false, errCode("mailbox_not_found", "邮箱不存在", false)
+	}
+	remoteID = strings.TrimSpace(remoteID)
+	if remoteID != "" {
+		for i, msg := range s.state.Messages {
+			if msg.MailboxID == mailboxID && msg.RemoteID == remoteID {
+				s.state.Messages[i].Source = strings.TrimSpace(source)
+				s.state.Messages[i].Subject = strings.TrimSpace(subject)
+				s.state.Messages[i].From = strings.TrimSpace(from)
+				s.state.Messages[i].Body = body
+				if !receivedAt.IsZero() {
+					s.state.Messages[i].ReceivedAt = receivedAt
+				}
+				s.state.Messages[i].CreatedAt = firstNonZeroTime(s.state.Messages[i].CreatedAt, time.Now())
+				s.state.Mailboxes[idx].UpdatedAt = time.Now()
+				return s.state.Messages[i], false, s.saveLocked()
+			}
+		}
+	}
+	if receivedAt.IsZero() {
+		receivedAt = time.Now()
+	}
+	msg := Message{
+		ID:         s.nextIDLocked("msg"),
+		MailboxID:  mailboxID,
+		RemoteID:   remoteID,
+		Source:     strings.TrimSpace(source),
+		Subject:    strings.TrimSpace(subject),
+		From:       strings.TrimSpace(from),
+		Body:       body,
+		ReceivedAt: receivedAt,
+		CreatedAt:  time.Now(),
+	}
+	s.state.Messages = append(s.state.Messages, msg)
+	s.state.Mailboxes[idx].ReceiveCount++
+	s.state.Mailboxes[idx].UpdatedAt = time.Now()
+	return msg, true, s.saveLocked()
 }
 
 func (s *FileStore) SetMailboxStatus(id string, apiActive *bool, icloudActive *bool, status, note string) (Mailbox, error) {
@@ -257,6 +341,16 @@ func cloneState(in State) State {
 	out.Accounts = append([]Account(nil), in.Accounts...)
 	out.Mailboxes = append([]Mailbox(nil), in.Mailboxes...)
 	out.Messages = append([]Message(nil), in.Messages...)
+	if in.ICloudSession != nil {
+		session := cloneICloudSession(*in.ICloudSession)
+		out.ICloudSession = &session
+	}
+	return out
+}
+
+func cloneICloudSession(in ICloudSession) ICloudSession {
+	out := in
+	out.Cookies = append([]SessionCookie(nil), in.Cookies...)
 	return out
 }
 
@@ -270,4 +364,13 @@ func (e codedError) Error() string { return e.message }
 
 func errCode(code, message string, retryable bool) error {
 	return codedError{code: code, message: message, retryable: retryable}
+}
+
+func firstNonZeroTime(values ...time.Time) time.Time {
+	for _, value := range values {
+		if !value.IsZero() {
+			return value
+		}
+	}
+	return time.Time{}
 }

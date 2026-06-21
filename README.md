@@ -2,15 +2,19 @@
 
 独立项目，用来管理 iCloud 隐私邮箱 API 地址，并给注册项目提供取验证码接口。
 
-当前版本是 MVP：
+当前版本：
 
 - 支持本地 Web 面板。
 - 支持录入 iCloud 账号标签。
 - 支持手动导入已经创建好的隐私邮箱。
+- 支持通过比特浏览器手动登录 iCloud 后保存本地登录态。
+- 支持协议调用 iCloud Hide My Email `generate + reserve` 创建隐私邮箱。
+- 支持同步 iCloud 邮件服务并提取验证码。
 - 支持为每个隐私邮箱生成独立 API 地址。
 - 支持导入邮件测试数据。
 - 支持从邮件标题/正文提取 6 位验证码。
-- 预留 iCloud Provider 接口位置，后续接真实 Apple/iCloud 隐私邮箱创建能力。
+- 支持对外提供取码 API。
+- 支持管理接口 Admin Key、外部健康检查、自动取号接口。
 
 ## 启动
 
@@ -40,16 +44,81 @@ Copy-Item .\config.example.json .\config.json
 | `port` | 监听端口，默认 `8787` |
 | `data_path` | 本地状态文件，默认 `data/state.json` |
 | `api_key` | 全局 API Key，可留空；每个邮箱也会自动生成独立 key |
+| `admin_key` | 管理接口 Admin Key，可留空；部署到服务器时建议必填 |
+| `public_base_url` | 对外复制 API 地址使用的公网 Base URL，可留空自动用当前访问地址 |
+| `bit_browser_api` | 比特浏览器本地 API，默认 `http://127.0.0.1:54345` |
+| `bit_browser_id` | 固定比特浏览器窗口 ID，可留空自动新建 |
+| `icloud_login_url` | 手动登录打开地址，默认 `https://www.icloud.com.cn/icloudplus/` |
+| `icloud_default_host` | 保存登录态时校验用 iCloud host，默认 `www.icloud.com.cn` |
 
-`config.json`、`data/`、`logs/` 默认不会提交 Git。
+`config.json`、`data/`、`logs/`、`captures/` 默认不会提交 Git。
+
+部署到服务器时建议至少配置：
+
+```json
+{
+  "host": "0.0.0.0",
+  "port": 8787,
+  "api_key": "CHANGE_ME_GLOBAL_API_KEY",
+  "admin_key": "CHANGE_ME_ADMIN_KEY",
+  "public_base_url": "https://your-domain.example"
+}
+```
+
+说明：
+
+- `api_key`：给外部项目调用健康检查/自动取号时使用；单个邮箱仍有独立 `mailbox_key`。
+- `admin_key`：保护面板管理接口。前端 `服务配置` 里填写后会保存到本机浏览器 `localStorage`，不会写入服务端。
+- `public_base_url`：复制出来的邮箱 API 地址会使用这个域名，方便发给其他项目或部署到公网。
 
 ## 使用流程
 
-1. 先在外部 iCloud/隐私邮箱平台创建好邮箱。
+### 方式一：协议创建隐私邮箱
+
+1. 启动比特浏览器本地服务。
+2. 在面板 `iCloud 协议登录态` 点击 `打开登录窗口`。
+3. 在打开的窗口里手动登录 iCloud，并确认账号具备 iCloud+ / Hide My Email 权限。
+4. 回到面板点击 `保存登录态`。
+5. 保存成功后点击 `协议创建邮箱`，后端会调用：
+   - `POST /v1/hme/generate`
+   - `POST /v1/hme/reserve`
+6. 创建成功的邮箱会自动写入本地邮箱列表，并生成独立 API 地址。
+7. 收到验证码邮件后，取码 API 会自动同步 iCloud 邮件并提取 6 位验证码；也可以在面板点击 `同步邮件` 手动触发。
+
+### 方式二：手动导入已有隐私邮箱
+
+1. 在外部 iCloud/隐私邮箱平台创建好邮箱。
 2. 在本项目面板里添加 iCloud 账号标签。
 3. 导入隐私邮箱，例如 `alias@icloud.com`。
 4. 面板会生成 `API 地址`。
 5. 注册项目使用这个 API 地址取验证码。
+
+## iCloud 登录态保存
+
+登录态保存流程只保存到本地 `data/state.json`，该目录默认被 `.gitignore` 排除。
+
+前端返回只显示脱敏状态：
+
+- Apple ID 掩码
+- DSID 掩码
+- Cookie 数量
+- iCloud+ / Hide My Email 权限状态
+- `premiummailsettings` 服务地址
+- `mccgateway` 邮件同步服务地址
+- `mail` 服务地址
+
+不会把 Cookie、Session、Token 原文返回给前端或写入日志。
+
+相关接口：
+
+```http
+POST /api/icloud/browser/open
+POST /api/icloud/session/save
+GET  /api/icloud/session
+POST /api/icloud/mailboxes/create
+```
+
+登录态过期、iCloud 权限变化或 Apple 要求重新验证时，需要重新打开登录窗口并保存登录态。
 
 ## 对外取码 API
 
@@ -64,6 +133,14 @@ GET /api/v1/mailboxes/{email}/code?key=<mailbox_key>&after=<RFC3339>
 ```http
 GET /api/mailboxes/{id}/code?key=<mailbox_key>&after=<RFC3339>
 ```
+
+可选参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `key` | 必填；单邮箱 key 或全局 `api_key` |
+| `after` | 建议必填；只接受这个时间之后的新邮件，避免拿旧验证码 |
+| `keyword` | 邮件关键词，默认 `OpenAI` |
 
 成功：
 
@@ -89,20 +166,118 @@ GET /api/mailboxes/{id}/code?key=<mailbox_key>&after=<RFC3339>
 }
 ```
 
+取码时服务端会先尝试同步 iCloud 邮件，再查本地已入库验证码邮件。同步失败会写本地服务日志，API 仍会回退查本地已导入/已同步邮件。
+
+## 外部项目 API
+
+### 健康检查
+
+```http
+GET /api/v1/health
+Authorization: Bearer <api_key>
+```
+
+返回：
+
+```json
+{
+  "success": true,
+  "service": "icloud-privacy-mail",
+  "api_active": true,
+  "icloud_active": true,
+  "time": "2026-06-21T12:00:00+08:00"
+}
+```
+
+### 自动取号
+
+自动取号需要配置全局 `api_key`。
+
+```http
+POST /api/v1/mailboxes/claim
+Authorization: Bearer <api_key>
+Content-Type: application/json
+
+{
+  "project": "openai",
+  "purpose": "register",
+  "count": 1
+}
+```
+
+返回一个 `status=available` 且 `api_active=true`、`icloud_active=true` 的邮箱，并自动标记为 `used`，避免并发重复领取：
+
+```json
+{
+  "success": true,
+  "mailbox": {
+    "email": "alias@icloud.com",
+    "api_url": "https://your-domain.example/api/v1/mailboxes/alias%40icloud.com/code?key=...",
+    "api_active": true,
+    "icloud_active": true,
+    "status": "used"
+  }
+}
+```
+
+如果没有可用邮箱：
+
+```json
+{
+  "success": false,
+  "code": "no_available_mailbox",
+  "message": "没有可用隐私邮箱",
+  "retryable": false
+}
+```
+
+## 管理接口
+
+如果配置了 `admin_key`，除以下对外接口外，所有 `/api/` 管理接口都需要 Admin Key：
+
+- `GET /`
+- `GET /api/v1/health`
+- `POST /api/v1/mailboxes/claim`
+- `GET /api/v1/mailboxes/{email}/code`
+- `GET /api/mailboxes/{id}/code`
+
+请求头任选一种：
+
+```http
+X-Admin-Key: <admin_key>
+Authorization: Bearer <admin_key>
+```
+
+面板里可直接在 `服务配置 -> Admin Key` 填写。
+
+## 邮件同步
+
+同步入口：
+
+```http
+POST /api/mailboxes/{id}/sync?keyword=OpenAI
+X-Admin-Key: <admin_key>
+```
+
+同步逻辑：
+
+1. 使用保存的 iCloud Cookie 和 `setup/ws/1/validate` 得到的服务地址。
+2. 调用 iCloud Mail `mccgateway` 邮件接口读取 Inbox/分类文件夹最近线程。
+3. 按隐私邮箱别名匹配收件人。
+4. 只把能提取到 6 位 OTP 的邮件写入本地 `data/state.json`。
+5. 使用 iCloud 远端消息 ID 去重，重复同步不会重复增加收件数。
+
 ## 当前限制
 
-当前版本还没有接真实 Apple/iCloud 自动创建隐私邮箱接口。创建邮箱前提是：
-
-- 你已经在外部系统创建好了隐私邮箱。
-- 或者后续把真实 iCloud Provider 接到本项目。
-
-也就是说，本项目现在先把“邮箱 API 工作台”和“取码 API”跑通，后面再补“自动创建隐私邮箱”。
+- Apple 登录仍然需要手动完成；项目只保存手动登录后的本地会话。
+- 登录态可能过期；过期后需要重新打开窗口登录并保存。
+- 邮件同步依赖 iCloud 网页服务接口和当前登录态；Apple 页面/接口变化时需要重新适配。
+- iCloud Cookie 属于敏感数据，只能保存在本机 `data/`，不要打包给别人。
+- 对外部署时不要把管理面板裸露在公网；至少配置 `admin_key`，并优先通过反向代理加 HTTPS。
 
 ## 后续实现顺序
 
-1. 接真实 iCloud Provider。
-2. 自动创建 Hide My Email 地址。
-3. 自动同步邮件。
-4. 增加账号登录态状态：`need_login`、`need_2fa`、`no_icloud_plus`、`rate_limited`。
-5. 给主注册项目新增 `icloud_api` 邮箱来源。
-
+1. 增加登录态自动检测和过期提示。
+2. 增加批量创建队列。
+3. 增加账号登录态状态：`need_login`、`need_2fa`、`no_icloud_plus`、`rate_limited`。
+4. 给主注册项目新增 `icloud_api` 邮箱来源。

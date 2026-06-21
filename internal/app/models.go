@@ -18,10 +18,11 @@ const (
 )
 
 type State struct {
-	NextID    int       `json:"next_id"`
-	Accounts  []Account `json:"accounts"`
-	Mailboxes []Mailbox `json:"mailboxes"`
-	Messages  []Message `json:"messages"`
+	NextID        int            `json:"next_id"`
+	Accounts      []Account      `json:"accounts"`
+	Mailboxes     []Mailbox      `json:"mailboxes"`
+	Messages      []Message      `json:"messages"`
+	ICloudSession *ICloudSession `json:"icloud_session,omitempty"`
 }
 
 type Account struct {
@@ -53,11 +54,41 @@ type Mailbox struct {
 type Message struct {
 	ID         string    `json:"id"`
 	MailboxID  string    `json:"mailbox_id"`
+	RemoteID   string    `json:"remote_id,omitempty"`
+	Source     string    `json:"source,omitempty"`
 	Subject    string    `json:"subject"`
 	From       string    `json:"from"`
 	Body       string    `json:"body"`
 	ReceivedAt time.Time `json:"received_at"`
 	CreatedAt  time.Time `json:"created_at"`
+}
+
+type ICloudSession struct {
+	SavedAt            time.Time       `json:"saved_at"`
+	AppleID            string          `json:"apple_id,omitempty"`
+	DSID               string          `json:"dsid"`
+	ClientID           string          `json:"client_id"`
+	ClientBuildNumber  string          `json:"client_build_number"`
+	MasteringNumber    string          `json:"client_mastering_number"`
+	PremiumMailBaseURL string          `json:"premium_mail_base_url"`
+	MailGatewayBaseURL string          `json:"mail_gateway_base_url,omitempty"`
+	MailBaseURL        string          `json:"mail_base_url,omitempty"`
+	Host               string          `json:"host"`
+	IsICloudPlus       bool            `json:"is_icloud_plus"`
+	CanCreateHME       bool            `json:"can_create_hme"`
+	Cookies            []SessionCookie `json:"cookies"`
+	Note               string          `json:"note,omitempty"`
+}
+
+type SessionCookie struct {
+	Name     string  `json:"name"`
+	Value    string  `json:"value"`
+	Domain   string  `json:"domain"`
+	Path     string  `json:"path"`
+	Expires  float64 `json:"expires,omitempty"`
+	Secure   bool    `json:"secure,omitempty"`
+	HTTPOnly bool    `json:"http_only,omitempty"`
+	SameSite string  `json:"same_site,omitempty"`
 }
 
 type publicAccount struct {
@@ -95,6 +126,25 @@ type publicMessage struct {
 	Body       string `json:"body"`
 	ReceivedAt string `json:"received_at"`
 	CreatedAt  string `json:"created_at"`
+}
+
+type publicICloudSession struct {
+	Saved              bool   `json:"saved"`
+	SavedAt            string `json:"saved_at,omitempty"`
+	AppleID            string `json:"apple_id,omitempty"`
+	DSIDMask           string `json:"dsid_mask,omitempty"`
+	ClientBuildNumber  string `json:"client_build_number,omitempty"`
+	MasteringNumber    string `json:"client_mastering_number,omitempty"`
+	PremiumMailBaseURL string `json:"premium_mail_base_url,omitempty"`
+	MailGatewayBaseURL string `json:"mail_gateway_base_url,omitempty"`
+	MailBaseURL        string `json:"mail_base_url,omitempty"`
+	Host               string `json:"host,omitempty"`
+	IsICloudPlus       bool   `json:"is_icloud_plus"`
+	CanCreateHME       bool   `json:"can_create_hme"`
+	CookieCount        int    `json:"cookie_count"`
+	ProviderConfigured bool   `json:"provider_configured"`
+	NeedsManualLogin   bool   `json:"needs_manual_login"`
+	LastStatusMessage  string `json:"last_status_message,omitempty"`
 }
 
 type apiError struct {

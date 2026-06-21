@@ -9,18 +9,30 @@ import (
 )
 
 type Config struct {
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	DataPath string `json:"data_path"`
-	APIKey   string `json:"api_key"`
+	Host              string `json:"host"`
+	Port              int    `json:"port"`
+	DataPath          string `json:"data_path"`
+	APIKey            string `json:"api_key"`
+	AdminKey          string `json:"admin_key"`
+	PublicBaseURL     string `json:"public_base_url"`
+	BitBrowserAPI     string `json:"bit_browser_api"`
+	BitBrowserID      string `json:"bit_browser_id"`
+	ICloudLoginURL    string `json:"icloud_login_url"`
+	ICloudDefaultHost string `json:"icloud_default_host"`
 }
 
 func LoadConfig(path string) (Config, error) {
 	cfg := Config{
-		Host:     "127.0.0.1",
-		Port:     8787,
-		DataPath: filepath.Join("data", "state.json"),
-		APIKey:   strings.TrimSpace(os.Getenv("IPM_API_KEY")),
+		Host:              "127.0.0.1",
+		Port:              8787,
+		DataPath:          filepath.Join("data", "state.json"),
+		APIKey:            strings.TrimSpace(os.Getenv("IPM_API_KEY")),
+		AdminKey:          strings.TrimSpace(os.Getenv("IPM_ADMIN_KEY")),
+		PublicBaseURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("IPM_PUBLIC_BASE_URL")), "/"),
+		BitBrowserAPI:     "http://127.0.0.1:54345",
+		BitBrowserID:      strings.TrimSpace(os.Getenv("IPM_BIT_BROWSER_ID")),
+		ICloudLoginURL:    "https://www.icloud.com.cn/icloudplus/",
+		ICloudDefaultHost: "www.icloud.com.cn",
 	}
 	if path == "" {
 		return cfg, nil
@@ -47,6 +59,24 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if strings.TrimSpace(fromFile.APIKey) != "" {
 		cfg.APIKey = strings.TrimSpace(fromFile.APIKey)
+	}
+	if strings.TrimSpace(fromFile.AdminKey) != "" {
+		cfg.AdminKey = strings.TrimSpace(fromFile.AdminKey)
+	}
+	if strings.TrimSpace(fromFile.PublicBaseURL) != "" {
+		cfg.PublicBaseURL = strings.TrimRight(strings.TrimSpace(fromFile.PublicBaseURL), "/")
+	}
+	if strings.TrimSpace(fromFile.BitBrowserAPI) != "" {
+		cfg.BitBrowserAPI = strings.TrimRight(strings.TrimSpace(fromFile.BitBrowserAPI), "/")
+	}
+	if strings.TrimSpace(fromFile.BitBrowserID) != "" {
+		cfg.BitBrowserID = strings.TrimSpace(fromFile.BitBrowserID)
+	}
+	if strings.TrimSpace(fromFile.ICloudLoginURL) != "" {
+		cfg.ICloudLoginURL = strings.TrimSpace(fromFile.ICloudLoginURL)
+	}
+	if strings.TrimSpace(fromFile.ICloudDefaultHost) != "" {
+		cfg.ICloudDefaultHost = strings.TrimSpace(fromFile.ICloudDefaultHost)
 	}
 	return cfg, nil
 }

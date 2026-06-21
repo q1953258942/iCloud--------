@@ -2,6 +2,11 @@
   "host": "127.0.0.1",
   "port": 8787,
   "data_path": "data/state.json",
-  "api_key": ""
+  "api_key": "",
+  "admin_key": "",
+  "public_base_url": "",
+  "bit_browser_api": "http://127.0.0.1:54345",
+  "bit_browser_id": "",
+  "icloud_login_url": "https://www.icloud.com.cn/icloudplus/",
+  "icloud_default_host": "www.icloud.com.cn"
 }
-

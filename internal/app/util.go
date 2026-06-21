@@ -32,3 +32,12 @@ func formatTime(t time.Time) string {
 	}
 	return t.Format(time.RFC3339)
 }
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}

@@ -1,7 +1,15 @@
 package app
 
 import (
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestExtractOTP(t *testing.T) {
@@ -22,4 +30,163 @@ func TestExtractOTP(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCookieHeaderFiltersByDomainAndExpiry(t *testing.T) {
+	cookies := []SessionCookie{
+		{Name: "ok", Value: "1", Domain: ".icloud.com.cn", Path: "/"},
+		{Name: "other", Value: "2", Domain: ".example.com", Path: "/"},
+		{Name: "expired", Value: "3", Domain: ".icloud.com.cn", Path: "/", Expires: 1},
+	}
+	got := cookieHeader(cookies, "https://p213-maildomainws.icloud.com.cn/v1/hme/generate")
+	if got != "ok=1" {
+		t.Fatalf("cookieHeader() = %q, want ok=1", got)
+	}
+}
+
+func TestICloudEndpointAddsProtocolQuery(t *testing.T) {
+	client := NewICloudClient()
+	got, err := client.endpoint(ICloudSession{
+		PremiumMailBaseURL: "https://p213-maildomainws.icloud.com.cn:443",
+		DSID:               "123",
+		ClientID:           "cid",
+		ClientBuildNumber:  "build",
+		MasteringNumber:    "master",
+	}, "/v1/hme/generate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"https://p213-maildomainws.icloud.com.cn:443/v1/hme/generate?",
+		"clientBuildNumber=build",
+		"clientMasteringNumber=master",
+		"clientId=cid",
+		"dsid=123",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("endpoint %q missing %q", got, want)
+		}
+	}
+}
+
+func TestMailGatewayBaseURLFallback(t *testing.T) {
+	got, err := mailGatewayBaseURL(ICloudSession{MailBaseURL: "https://p213-mailws.icloud.com.cn:443"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://p213-mccgateway.icloud.com.cn:443" {
+		t.Fatalf("mailGatewayBaseURL() = %q", got)
+	}
+
+	got, err = mailGatewayBaseURL(ICloudSession{PremiumMailBaseURL: "https://p213-maildomainws.icloud.com.cn:443"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://p213-mccgateway.icloud.com.cn:443" {
+		t.Fatalf("mailGatewayBaseURL() from premium = %q", got)
+	}
+}
+
+func TestUpsertMessageDeduplicatesRemoteID(t *testing.T) {
+	store := newTestStore(t)
+	mailbox, err := store.AddMailbox("", "UPI-1", "alias@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, created, err := store.UpsertMessage(mailbox.ID, "remote-1", "icloud", "code 123456", "noreply", "first", zeroTime()); err != nil || !created {
+		t.Fatalf("first upsert created=%v err=%v", created, err)
+	}
+	if _, created, err := store.UpsertMessage(mailbox.ID, "remote-1", "icloud", "code 654321", "noreply", "updated", zeroTime()); err != nil || created {
+		t.Fatalf("second upsert created=%v err=%v", created, err)
+	}
+	state := store.Snapshot()
+	if len(state.Messages) != 1 {
+		t.Fatalf("messages len = %d, want 1", len(state.Messages))
+	}
+	if state.Messages[0].Body != "updated" {
+		t.Fatalf("message body = %q", state.Messages[0].Body)
+	}
+	if state.Mailboxes[0].ReceiveCount != 1 {
+		t.Fatalf("receive_count = %d, want 1", state.Mailboxes[0].ReceiveCount)
+	}
+}
+
+func TestAdminKeyProtectsManagementAPI(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{AdminKey: "admin-secret"}, store, discardLogger())
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status without admin = %d, want 401", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req.Header.Set("X-Admin-Key", "admin-secret")
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status with admin = %d, want 200", rr.Code)
+	}
+}
+
+func TestClaimMailboxRequiresGlobalAPIKeyAndMarksUsed(t *testing.T) {
+	store := newTestStore(t)
+	mailbox, err := store.AddMailbox("", "UPI-1", "alias@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(Config{APIKey: "global-key", PublicBaseURL: "https://mail.example"}, store, discardLogger())
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/mailboxes/claim", strings.NewReader(`{"project":"openai","purpose":"register"}`))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("claim without key = %d, want 401", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/mailboxes/claim", strings.NewReader(`{"project":"openai","purpose":"register"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer global-key")
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("claim with key = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Success bool          `json:"success"`
+		Mailbox publicMailbox `json:"mailbox"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Success || body.Mailbox.ID != mailbox.ID || body.Mailbox.Status != StatusUsed {
+		t.Fatalf("claim body = %+v", body)
+	}
+	if !strings.HasPrefix(body.Mailbox.APIURL, "https://mail.example/") {
+		t.Fatalf("api_url = %q", body.Mailbox.APIURL)
+	}
+	updated, ok := store.FindMailboxByID(mailbox.ID)
+	if !ok || updated.Status != StatusUsed {
+		t.Fatalf("stored mailbox = %+v ok=%v", updated, ok)
+	}
+}
+
+func newTestStore(t *testing.T) *FileStore {
+	t.Helper()
+	store, err := NewFileStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func zeroTime() time.Time {
+	return time.Time{}
 }
