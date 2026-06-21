@@ -6,20 +6,20 @@
   <title>iCloud Privacy Mail</title>
   <style>
     :root {
-      --bg: #06110c;
-      --bg-soft: #0b1c14;
-      --panel: rgba(7, 22, 16, .92);
-      --panel-2: rgba(10, 31, 22, .72);
-      --line: rgba(67, 220, 140, .16);
-      --line-strong: rgba(67, 220, 140, .32);
-      --text: #e8fff1;
-      --muted: #8fb9a2;
-      --faint: #5f8672;
-      --green: #35e28a;
-      --green-2: #9dffd0;
-      --orange: #ffcc7a;
-      --red: #ff7f73;
-      --shadow: 0 24px 80px rgba(0, 0, 0, .34);
+      --bg: #eef8f6;
+      --bg-soft: #f8fbff;
+      --panel: rgba(255, 255, 255, .92);
+      --panel-2: rgba(248, 251, 255, .82);
+      --line: rgba(118, 143, 174, .22);
+      --line-strong: rgba(132, 156, 188, .36);
+      --text: #061637;
+      --muted: #4e6483;
+      --faint: #8290a8;
+      --green: #13b8a6;
+      --green-2: #059b87;
+      --orange: #b7791f;
+      --red: #dc2626;
+      --shadow: 0 28px 90px rgba(17, 70, 101, .12);
     }
     * { box-sizing: border-box; }
     body {
@@ -27,15 +27,16 @@
       min-height: 100vh;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background:
-        radial-gradient(circle at 18% -10%, rgba(44, 226, 133, .16), transparent 30%),
-        radial-gradient(circle at 92% 8%, rgba(20, 111, 74, .22), transparent 32%),
-        linear-gradient(180deg, #06110c 0%, #030705 100%);
+        radial-gradient(circle at 4% 8%, rgba(27, 188, 170, .18), transparent 30%),
+        radial-gradient(circle at 92% 2%, rgba(56, 189, 248, .14), transparent 28%),
+        radial-gradient(circle at 55% 88%, rgba(218, 255, 244, .72), transparent 36%),
+        linear-gradient(180deg, #f8fbff 0%, #edf8f5 48%, #f7fbfa 100%);
       color: var(--text);
     }
     button, input, textarea, select { font: inherit; }
     header {
       border-bottom: 1px solid var(--line);
-      background: rgba(2, 9, 6, .78);
+      background: rgba(248, 253, 252, .74);
       backdrop-filter: blur(18px);
       position: sticky;
       top: 0;
@@ -53,17 +54,17 @@
     h1 { margin: 0; font-size: 28px; letter-spacing: -.03em; }
     h2 { margin: 0; font-size: 17px; letter-spacing: -.01em; }
     .sub { color: var(--muted); margin-top: 7px; line-height: 1.6; }
-    .eyebrow { color: var(--green); font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 6px; }
+    .eyebrow { color: var(--green-2); font-size: 12px; font-weight: 900; letter-spacing: .16em; text-transform: uppercase; margin-bottom: 6px; }
     main { max-width: 1480px; margin: 0 auto; padding: 22px 28px 34px; }
     .grid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 14px; margin-bottom: 18px; }
     .card {
       border: 1px solid var(--line);
       border-radius: 18px;
       padding: 18px;
-      background: linear-gradient(180deg, rgba(13, 42, 29, .78), rgba(5, 18, 13, .82));
-      box-shadow: 0 14px 40px rgba(0, 0, 0, .18);
+      background: linear-gradient(180deg, rgba(255, 255, 255, .96), rgba(248, 253, 251, .86));
+      box-shadow: 0 16px 44px rgba(17, 70, 101, .08);
     }
-    .card strong { display: block; color: var(--green-2); font-size: 34px; line-height: 1; margin-bottom: 10px; letter-spacing: -.04em; }
+    .card strong { display: block; color: var(--text); font-size: 34px; line-height: 1; margin-bottom: 10px; letter-spacing: -.04em; }
     .card span { color: var(--muted); font-size: 13px; }
     .layout { display: grid; gap: 18px; align-items: start; }
     .workflow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; align-items: stretch; }
@@ -74,11 +75,12 @@
       overflow: hidden;
       background: var(--panel);
       box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
     }
     .panel-head {
       padding: 17px 18px 14px;
       border-bottom: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(13, 39, 28, .72), rgba(6, 21, 15, .36));
+      background: linear-gradient(180deg, rgba(255, 255, 255, .9), rgba(246, 252, 251, .72));
     }
     .panel-head p { margin: 5px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
     .toolbar, .form { display: flex; flex-wrap: wrap; gap: 10px; padding: 16px 18px; align-items: end; }
@@ -89,7 +91,7 @@
     input, textarea, select {
       width: 100%;
       min-width: 0;
-      background: rgba(1, 8, 6, .78);
+      background: rgba(255, 255, 255, .9);
       color: var(--text);
       border: 1px solid var(--line-strong);
       border-radius: 12px;
@@ -98,13 +100,13 @@
       transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
     }
     input:focus, textarea:focus, select:focus {
-      border-color: rgba(53, 226, 138, .72);
-      box-shadow: 0 0 0 3px rgba(53, 226, 138, .12);
-      background: rgba(1, 12, 8, .94);
+      border-color: rgba(19, 184, 166, .62);
+      box-shadow: 0 0 0 4px rgba(19, 184, 166, .12);
+      background: #fff;
     }
     textarea { min-height: 88px; resize: vertical; }
     button {
-      background: rgba(12, 48, 33, .86);
+      background: rgba(255, 255, 255, .9);
       color: var(--text);
       border: 1px solid var(--line-strong);
       border-radius: 12px;
@@ -113,59 +115,59 @@
       transition: transform .12s ease, border-color .12s ease, background .12s ease;
       white-space: nowrap;
     }
-    button:hover { transform: translateY(-1px); border-color: rgba(53, 226, 138, .68); background: rgba(15, 65, 43, .92); }
-    button.primary { background: linear-gradient(135deg, #35e28a, #9dffd0); color: #04130c; border-color: transparent; font-weight: 800; }
-    button.danger { border-color: rgba(255, 127, 115, .46); color: #ffb0a9; background: rgba(64, 13, 9, .56); }
+    button:hover { transform: translateY(-1px); border-color: rgba(19, 184, 166, .46); background: #f3fffb; }
+    button.primary { background: linear-gradient(135deg, #13b8a6, #17c9ae); color: #fff; border-color: transparent; font-weight: 800; box-shadow: 0 12px 26px rgba(19, 184, 166, .18); }
+    button.danger { border-color: rgba(220, 38, 38, .2); color: #b91c1c; background: #fff5f5; }
     button.ghost { background: transparent; }
     button:disabled { cursor: not-allowed; opacity: .55; transform: none; }
     .notice {
       margin: 14px 18px 0;
       padding: 12px 13px;
-      color: #c9ffe0;
+      color: #0f766e;
       line-height: 1.65;
       white-space: pre-wrap;
-      background: rgba(8, 35, 24, .62);
+      background: rgba(236, 253, 245, .82);
       border: 1px solid var(--line);
       border-radius: 14px;
     }
     .hint { color: var(--faint); font-size: 12px; line-height: 1.6; padding: 0 18px 16px; }
     .table-wrap { overflow: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 940px; }
-    th, td { border-top: 1px solid rgba(67, 220, 140, .12); padding: 13px 14px; text-align: left; vertical-align: middle; }
-    th { color: var(--muted); font-size: 12px; font-weight: 800; background: rgba(5, 18, 13, .45); position: sticky; top: 0; }
-    tbody tr:hover { background: rgba(53, 226, 138, .045); }
+    th, td { border-top: 1px solid rgba(118, 143, 174, .16); padding: 13px 14px; text-align: left; vertical-align: middle; }
+    th { color: var(--muted); font-size: 12px; font-weight: 800; background: #f7fbff; position: sticky; top: 0; }
+    tbody tr:hover { background: rgba(19, 184, 166, .045); }
     .mail-title { font-weight: 800; }
-    .email { color: #d9fff0; font-weight: 700; }
+    .email { color: #0f766e; font-weight: 700; }
     .token-mask { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
     .muted { color: var(--faint); }
     .pill {
       display: inline-flex;
       align-items: center;
       gap: 5px;
-      border: 1px solid rgba(53, 226, 138, .35);
+      border: 1px solid rgba(19, 184, 166, .22);
       border-radius: 999px;
       padding: 4px 9px;
-      color: var(--green-2);
-      background: rgba(53, 226, 138, .08);
+      color: #047857;
+      background: rgba(209, 250, 229, .72);
       font-size: 12px;
       font-weight: 800;
       margin: 2px 4px 2px 0;
     }
-    .pill.off, .status-failed, .status-disabled { color: #ffb0a9; border-color: rgba(255, 127, 115, .4); background: rgba(255, 127, 115, .08); }
-    .status-used { color: var(--orange); border-color: rgba(255, 204, 122, .38); background: rgba(255, 204, 122, .08); }
-    .status-available, .status-active { color: var(--green-2); }
+    .pill.off, .status-failed, .status-disabled { color: #b91c1c; border-color: rgba(220, 38, 38, .2); background: #fff5f5; }
+    .status-used { color: #a16207; border-color: rgba(180, 83, 9, .2); background: #fffbeb; }
+    .status-available, .status-active { color: #047857; }
     .row-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
     .row-actions button, .row-actions select { width: auto; min-width: 0; padding: 8px 10px; border-radius: 10px; font-size: 12px; }
     .log {
       margin: 0;
-      background: #020806;
-      border-top: 1px solid rgba(67, 220, 140, .12);
+      background: rgba(248, 251, 255, .82);
+      border-top: 1px solid rgba(118, 143, 174, .16);
       padding: 16px 18px;
       white-space: pre-wrap;
       min-height: 210px;
       max-height: 360px;
       overflow: auto;
-      color: #c4ffe0;
+      color: #334155;
       font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
       font-size: 13px;
       line-height: 1.7;
