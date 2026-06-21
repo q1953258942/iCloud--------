@@ -12,7 +12,6 @@
 - 支持协议调用 iCloud Hide My Email `generate + reserve` 创建隐私邮箱。
 - 支持纯 Go 协议同步 iCloud Mail `mccgateway` 邮件服务并提取验证码，取码时不依赖浏览器页面执行脚本。
 - 支持手动检测 iCloud Mail 登录态，并可在面板设置每隔几分钟自动检测一次。
-- 支持在面板 `运行配置` 中切换服务器数据文件夹，用来保存登录态、账号、隐私邮箱和验证码邮件。
 - 支持从 `运行配置` 导出登录账号/登录态和已创建隐私邮箱池数据。
 - 支持为每个隐私邮箱生成独立 API 地址。
 - 支持导入邮件测试数据。
@@ -58,13 +57,11 @@ Copy-Item .\config.example.json .\config.json
 
 `config.json`、`data/`、`logs/`、`captures/` 默认不会提交 Git。
 
-也可以在面板右上角点击 `运行配置`，填写服务器数据文件夹。服务会把该目录下的 `state.json` 作为当前状态文件：
+面板右上角 `运行配置` 只提供数据导出，不显示也不修改服务器数据文件夹。服务器状态文件仍由 `config.json` 的 `data_path` 控制，默认写入 `data/state.json`。
 
-- 目录为空时：把当前内存状态迁移保存到新目录。
-- 目录已有 `state.json` 时：加载该文件里的账号、邮箱、登录态和邮件数据。
-- 配置会写回启动时使用的 `config.json`，重启后继续使用该目录。
-- 这是服务器路径，不是浏览器本机路径；公网取码 API 需要服务器保存这些数据。
-- `导出数据` 会下载当前登录账号/登录态和隐私邮箱池数据，包含登录态 Cookie 与邮箱 API token，请妥善保管。
+- `导出数据` 会导出当前登录账号/登录态和隐私邮箱池数据，包含登录态 Cookie 与邮箱 API token，请妥善保管。
+- 支持 File System Access API 的浏览器会弹出系统保存位置选择框；不支持时回退为浏览器默认下载。
+- 默认不导出验证码邮件历史；需要排障时可直接在服务端备份完整 `state.json`。
 
 部署到服务器时建议至少配置：
 
@@ -138,8 +135,6 @@ Copy-Item .\config.example.json .\config.json
 相关接口：
 
 ```http
-GET  /api/runtime/config
-POST /api/runtime/config
 GET  /api/runtime/export
 POST /api/icloud/protocol-login/start
 POST /api/icloud/protocol-login/2fa

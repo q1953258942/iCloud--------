@@ -369,19 +369,14 @@
     <section class="modal" onclick="event.stopPropagation()">
       <div class="panel-head">
         <h2>运行配置</h2>
-        <p>配置服务器数据文件夹。登录态、账号、隐私邮箱、验证码邮件都会写入该目录下的 state.json。</p>
+        <p>服务器按配置文件里的默认数据目录保存状态；这里仅用于导出备份。</p>
       </div>
-      <div class="notice" id="runConfigInfo">未读取运行配置。</div>
-      <div class="field-grid">
-        <label class="full">服务器数据文件夹<input id="runDataFolder" placeholder="/opt/icloud-privacy-mail/shared/data 或 data"></label>
-      </div>
+      <div class="notice" id="runConfigInfo">点击“导出数据”后选择保存位置。导出文件包含登录态 Cookie 和邮箱 API token，请妥善保管。</div>
       <div class="toolbar">
-        <button class="primary" onclick="saveRunConfig()">保存配置</button>
-        <button onclick="exportRuntimeData()">导出数据</button>
-        <button onclick="loadRunConfig()">重新读取</button>
+        <button class="primary" onclick="exportRuntimeData()">导出数据</button>
         <button class="ghost" onclick="closeRunConfig()">关闭</button>
       </div>
-      <div class="hint">说明：这是服务器路径，不是你电脑本地路径。公网取码 API 需要服务器持有这些数据；切换到空目录时会把当前数据迁移到新目录。导出数据包含登录态和邮箱 API token，请勿发给无关人员。</div>
+      <div class="hint">导出内容：登录账号/登录态 + 已创建隐私邮箱池；默认不包含验证码邮件历史。</div>
     </section>
   </div>
   <script>
@@ -459,42 +454,13 @@
       log('Admin Key 已清空');
     }
 
-    async function openRunConfig() {
+    function openRunConfig() {
       $('runConfigModal').classList.add('show');
-      await loadRunConfig();
     }
 
     function closeRunConfig(event) {
       if (event && event.target !== $('runConfigModal')) return;
       $('runConfigModal').classList.remove('show');
-    }
-
-    async function loadRunConfig() {
-      try {
-        const data = await api('/api/runtime/config');
-        $('runDataFolder').value = data.data_folder || '';
-        $('runConfigInfo').textContent =
-          `当前数据文件：${data.data_path || '-'}\n` +
-          `配置文件：${data.config_path || '-'}\n` +
-          '这些数据保存在服务器，用于公网取码 API。';
-      } catch (err) {
-        $('runConfigInfo').textContent = '读取失败：' + err.message + '\n如果服务端启用了 Admin Key，请先在高级配置里填写并保存。';
-      }
-    }
-
-    async function saveRunConfig() {
-      const folder = $('runDataFolder').value.trim();
-      if (!folder) {
-        log('运行配置保存失败：服务器数据文件夹不能为空');
-        return;
-      }
-      const data = await api('/api/runtime/config', {method:'POST', body: JSON.stringify({data_folder: folder})});
-      $('runConfigInfo').textContent =
-        `${data.message || '运行配置已保存'}\n` +
-        `当前数据文件：${data.data_path || '-'}\n` +
-        `账号 ${data.accounts || 0} / 邮箱 ${data.mailboxes || 0} / 邮件 ${data.messages || 0}`;
-      log('运行配置已保存：' + (data.data_path || folder));
-      await refresh();
     }
 
     async function exportRuntimeData() {
@@ -515,6 +481,25 @@
       const disposition = res.headers.get('content-disposition') || '';
       const match = disposition.match(/filename="([^"]+)"/i);
       const filename = match ? match[1] : `icloud-privacy-mail-state-${Date.now()}.json`;
+      if (window.showSaveFilePicker) {
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName: filename,
+            types: [{description: 'JSON 文件', accept: {'application/json': ['.json']}}],
+          });
+          const writable = await handle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          log('已导出数据到选择的位置：登录账号/登录态 + 隐私邮箱池');
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') {
+            log('已取消导出数据');
+            return;
+          }
+          log('系统保存对话框不可用，改用浏览器默认下载：' + err.message);
+        }
+      }
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
