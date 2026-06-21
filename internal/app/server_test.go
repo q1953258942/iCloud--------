@@ -167,6 +167,42 @@ func TestFileStoreSetPathMigratesAndLoadsState(t *testing.T) {
 	}
 }
 
+func TestRuntimeExportIncludesAccountsMailboxesAndSession(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.AddAccount("UPI-1", "user@example.com", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMailbox("", "UPI-2", "alias@icloud.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveICloudSession(ICloudSession{DSID: "123", Cookies: []SessionCookie{{Name: "session", Value: "x"}}}); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(Config{}, store, discardLogger())
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/runtime/export", nil)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("export status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Accounts      []Account      `json:"accounts"`
+		Mailboxes     []Mailbox      `json:"mailboxes"`
+		ICloudSession *ICloudSession `json:"icloud_session"`
+		Messages      []Message      `json:"messages"`
+		MessageCount  int            `json:"message_count"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Accounts) != 1 || len(body.Mailboxes) != 1 || body.ICloudSession == nil {
+		t.Fatalf("export body = %+v", body)
+	}
+	if len(body.Messages) != 0 || body.MessageCount != 0 {
+		t.Fatalf("messages exported by default = %d count=%d", len(body.Messages), body.MessageCount)
+	}
+}
+
 func TestLatestMailboxCodeSelectsNewestAndHonorsAfter(t *testing.T) {
 	oldTime := time.Date(2026, 6, 21, 21, 36, 50, 0, time.FixedZone("CST", 8*3600))
 	newTime := oldTime.Add(30 * time.Minute)

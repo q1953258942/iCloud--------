@@ -13,6 +13,7 @@
 - 支持纯 Go 协议同步 iCloud Mail `mccgateway` 邮件服务并提取验证码，取码时不依赖浏览器页面执行脚本。
 - 支持手动检测 iCloud Mail 登录态，并可在面板设置每隔几分钟自动检测一次。
 - 支持在面板 `运行配置` 中切换服务器数据文件夹，用来保存登录态、账号、隐私邮箱和验证码邮件。
+- 支持从 `运行配置` 导出登录账号/登录态和已创建隐私邮箱池数据。
 - 支持为每个隐私邮箱生成独立 API 地址。
 - 支持导入邮件测试数据。
 - 支持从邮件标题/正文提取 6 位验证码。
@@ -63,6 +64,7 @@ Copy-Item .\config.example.json .\config.json
 - 目录已有 `state.json` 时：加载该文件里的账号、邮箱、登录态和邮件数据。
 - 配置会写回启动时使用的 `config.json`，重启后继续使用该目录。
 - 这是服务器路径，不是浏览器本机路径；公网取码 API 需要服务器保存这些数据。
+- `导出数据` 会下载当前登录账号/登录态和隐私邮箱池数据，包含登录态 Cookie 与邮箱 API token，请妥善保管。
 
 部署到服务器时建议至少配置：
 
@@ -138,6 +140,7 @@ Copy-Item .\config.example.json .\config.json
 ```http
 GET  /api/runtime/config
 POST /api/runtime/config
+GET  /api/runtime/export
 POST /api/icloud/protocol-login/start
 POST /api/icloud/protocol-login/2fa
 POST /api/icloud/browser/open

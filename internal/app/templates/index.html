@@ -377,10 +377,11 @@
       </div>
       <div class="toolbar">
         <button class="primary" onclick="saveRunConfig()">保存配置</button>
+        <button onclick="exportRuntimeData()">导出数据</button>
         <button onclick="loadRunConfig()">重新读取</button>
         <button class="ghost" onclick="closeRunConfig()">关闭</button>
       </div>
-      <div class="hint">说明：这是服务器路径，不是你电脑本地路径。公网取码 API 需要服务器持有这些数据；切换到空目录时会把当前数据迁移到新目录。</div>
+      <div class="hint">说明：这是服务器路径，不是你电脑本地路径。公网取码 API 需要服务器持有这些数据；切换到空目录时会把当前数据迁移到新目录。导出数据包含登录态和邮箱 API token，请勿发给无关人员。</div>
     </section>
   </div>
   <script>
@@ -494,6 +495,35 @@
         `账号 ${data.accounts || 0} / 邮箱 ${data.mailboxes || 0} / 邮件 ${data.messages || 0}`;
       log('运行配置已保存：' + (data.data_path || folder));
       await refresh();
+    }
+
+    async function exportRuntimeData() {
+      const headers = {};
+      const key = currentAdminKey();
+      if (key) headers['X-Admin-Key'] = key;
+      const res = await fetch('/api/runtime/export', {headers});
+      if (!res.ok) {
+        let message = `HTTP ${res.status}`;
+        try {
+          const data = await res.json();
+          message = data.message || data.code || message;
+        } catch (_) {}
+        log('导出失败：' + message);
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get('content-disposition') || '';
+      const match = disposition.match(/filename="([^"]+)"/i);
+      const filename = match ? match[1] : `icloud-privacy-mail-state-${Date.now()}.json`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      log('已导出数据：登录账号/登录态 + 隐私邮箱池');
     }
 
     function initSessionCheckSettings() {

@@ -56,6 +56,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/mailboxes/claim", s.handleClaimMailbox)
 	s.mux.HandleFunc("GET /api/runtime/config", s.handleRuntimeConfig)
 	s.mux.HandleFunc("POST /api/runtime/config", s.handleUpdateRuntimeConfig)
+	s.mux.HandleFunc("GET /api/runtime/export", s.handleExportRuntimeData)
 	s.mux.HandleFunc("GET /api/icloud/session", s.handleICloudSession)
 	s.mux.HandleFunc("POST /api/icloud/protocol-login/start", s.handleStartICloudProtocolLogin)
 	s.mux.HandleFunc("POST /api/icloud/protocol-login/2fa", s.handleSubmitICloudProtocol2FA)
@@ -204,6 +205,44 @@ func (s *Server) handleUpdateRuntimeConfig(w http.ResponseWriter, r *http.Reques
 		"messages":    len(state.Messages),
 		"message":     "运行配置已保存，后续账号、登录态、邮箱和验证码邮件会写入该服务器数据文件夹",
 	})
+}
+
+func (s *Server) handleExportRuntimeData(w http.ResponseWriter, r *http.Request) {
+	state := s.store.Snapshot()
+	payload := struct {
+		ExportedAt     string         `json:"exported_at"`
+		DataPath       string         `json:"data_path"`
+		NextID         int            `json:"next_id"`
+		Accounts       []Account      `json:"accounts"`
+		Mailboxes      []Mailbox      `json:"mailboxes"`
+		ICloudSession  *ICloudSession `json:"icloud_session,omitempty"`
+		MessageCount   int            `json:"message_count"`
+		Messages       []Message      `json:"messages,omitempty"`
+		IncludeMessage bool           `json:"include_messages"`
+	}{
+		ExportedAt:     formatTime(time.Now()),
+		DataPath:       s.store.Path(),
+		NextID:         state.NextID,
+		Accounts:       state.Accounts,
+		Mailboxes:      state.Mailboxes,
+		ICloudSession:  state.ICloudSession,
+		MessageCount:   len(state.Messages),
+		IncludeMessage: truthy(r.URL.Query().Get("include_messages")),
+	}
+	if payload.IncludeMessage {
+		payload.Messages = state.Messages
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	filename := "icloud-privacy-mail-state-" + time.Now().Format("20060102-150405") + ".json"
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(append(data, '\n'))
 }
 
 func (s *Server) handleICloudSession(w http.ResponseWriter, _ *http.Request) {
