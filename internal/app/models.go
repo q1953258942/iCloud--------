@@ -64,21 +64,23 @@ type Account struct {
 }
 
 type Mailbox struct {
-	ID           string    `json:"id"`
-	OwnerID      string    `json:"owner_id,omitempty"`
-	AccountID    string    `json:"account_id"`
-	Label        string    `json:"label"`
-	Email        string    `json:"email"`
-	APIToken     string    `json:"api_token"`
-	APIActive    bool      `json:"api_active"`
-	ICloudActive bool      `json:"icloud_active"`
-	ReceiveCount int       `json:"receive_count"`
-	Status       string    `json:"status"`
-	Note         string    `json:"note"`
-	LastSyncAt   time.Time `json:"last_sync_at,omitempty"`
-	LastSyncUID  string    `json:"last_sync_uid,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID                string    `json:"id"`
+	OwnerID           string    `json:"owner_id,omitempty"`
+	AccountID         string    `json:"account_id"`
+	Label             string    `json:"label"`
+	Email             string    `json:"email"`
+	APIToken          string    `json:"api_token"`
+	APIActive         bool      `json:"api_active"`
+	ICloudActive      bool      `json:"icloud_active"`
+	ReceiveCount      int       `json:"receive_count"`
+	Status            string    `json:"status"`
+	Note              string    `json:"note"`
+	LastSyncAt        time.Time `json:"last_sync_at,omitempty"`
+	LastSyncUID       string    `json:"last_sync_uid,omitempty"`
+	LastCodeMessageID string    `json:"last_code_message_id,omitempty"`
+	LastCodeAt        time.Time `json:"last_code_at,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type Message struct {

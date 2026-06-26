@@ -276,6 +276,7 @@
         </select>
         <button onclick="exportMailboxAPIs()">导出邮箱API</button>
         <button onclick="exportMailboxEmails()">只导出邮箱</button>
+        <button class="danger" onclick="cleanAllRemoteCodes()">一键删除码</button>
         <button onclick="openRunConfig()">运行配置</button>
         <button class="primary" onclick="refresh()">刷新状态</button>
       </div>
@@ -1030,6 +1031,7 @@
               <button onclick="copyAPI('${row.id}')">API 地址</button>
               <button onclick="verifyMailbox('${row.id}')">验证码</button>
               <button onclick="syncMailbox('${row.id}')">同步邮件</button>
+              <button onclick="cleanRemoteMailbox('${row.id}')" title="把本地已同步过的远端邮件移到废纸篓，并清空当前 iCloud 废纸篓">删除邮件</button>
               <select onchange="setMailboxStatus('${row.id}', this.value)">
                 <option value="">改状态</option>
                 <option value="available">可用</option>
@@ -1327,6 +1329,41 @@
         await refresh();
       } catch (err) {
         log('同步失败：' + err.message + '；通常是 iCloud 登录态过期或 Apple 接口拒绝，请重新协议登录');
+      }
+    }
+
+    async function cleanRemoteMailbox(id) {
+      const row = lastMailboxes.find(x => x.id === id);
+      if (!confirm('确认把本地已同步过的远端邮件移到废纸篓，并清空当前 iCloud 废纸篓？')) return;
+      log('开始清理远端邮件：' + (row ? row.email : id));
+      try {
+        const data = await api(`/api/mailboxes/${encodeURIComponent(id)}/remote-clean`, {
+          method:'POST',
+          body: JSON.stringify({move_synced: true, empty_trash: true})
+        });
+        const cleanup = data.cleanup || {};
+        log(`清理完成：移入废纸篓 ${cleanup.moved_to_trash || 0}，清空废纸篓 ${cleanup.destroyed || 0}，跳过 ${cleanup.skipped || 0}`);
+      } catch (err) {
+        log('清理远端失败：' + err.message);
+      }
+    }
+
+    async function cleanAllRemoteCodes() {
+      const accountID = (activeMailboxAccountKey && activeMailboxAccountKey !== 'all' && activeMailboxAccountKey !== 'unbound')
+        ? activeMailboxAccountKey
+        : '';
+      const scopeText = accountID ? `当前 Apple 账号 TAB` : '当前可见全部登录态';
+      if (!confirm(`确认一键删除${scopeText}下已同步过的验证码邮件，并清空对应 iCloud 废纸篓？`)) return;
+      log('开始一键删除验证码邮件：' + scopeText);
+      try {
+        const data = await api('/api/mailboxes/remote-clean', {
+          method:'POST',
+          body: JSON.stringify({account_id: accountID, move_synced: true, empty_trash: true})
+        });
+        const cleanup = data.cleanup || {};
+        log(`一键删除码完成：处理邮箱 ${data.mailboxes || 0}，失败邮箱 ${data.failed_mailboxes || 0}，移入废纸篓 ${cleanup.moved_to_trash || 0}，清空废纸篓 ${cleanup.destroyed || 0}，跳过 ${cleanup.skipped || 0}`);
+      } catch (err) {
+        log('一键删除码失败：' + err.message);
       }
     }
 

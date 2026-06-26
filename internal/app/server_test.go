@@ -212,6 +212,64 @@ func TestMailGatewayBaseURLFallback(t *testing.T) {
 	}
 }
 
+func TestICloudClientMoveRemoteMessagesToTrashAndEmptyTrash(t *testing.T) {
+	var sawMove bool
+	var sawDestroy bool
+	client := &ICloudClient{client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		response := `{}`
+		switch r.URL.Path {
+		case "/mailws2/v1/geqs/query":
+			response = `{"domainObjects":[{"identifier":"31","name":"INBOX","messageCount":1},{"identifier":"53","name":"Deleted Messages","messageCount":1}]}`
+		case "/mailws2/v1/message/list":
+			if strings.Contains(string(body), `"value":"31"`) {
+				response = `{"domainObjects":[{"uid":7,"identifier":"msg-inbox","mboxRef":{"id":"31"}}]}`
+			} else if strings.Contains(string(body), `"value":"53"`) {
+				response = `{"domainObjects":[{"uid":7,"identifier":"msg-trash","mboxRef":{"id":"53"}}]}`
+			}
+		case "/mailws2/v1/email/set":
+			if strings.Contains(string(body), `"batchUpdate"`) {
+				sawMove = true
+				response = `{"updated":{"msg-inbox":{"modseq":4}}}`
+			} else if strings.Contains(string(body), `"destroy"`) {
+				sawDestroy = true
+				response = `{"destroyed":["msg-trash"]}`
+			}
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(response)),
+			Request:    r,
+		}, nil
+	})}}
+	session := ICloudSession{
+		MailGatewayBaseURL: "https://p39-mccgateway.icloud.com",
+		DSID:               "123",
+		ClientID:           "cid",
+		ClientBuildNumber:  "build",
+		MasteringNumber:    "master",
+		Host:               "www.icloud.com",
+		Cookies:            []SessionCookie{{Name: "session", Value: "x", Domain: ".icloud.com", Path: "/"}},
+	}
+	moved, err := client.MoveRemoteMessagesToTrash(t.Context(), session, []string{"icloud:INBOX:7", "local:bad"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.MovedToTrash != 1 || moved.Skipped != 1 || !sawMove {
+		t.Fatalf("moved = %+v sawMove=%v, want moved=1 skipped=1", moved, sawMove)
+	}
+	destroyed, err := client.EmptyTrash(t.Context(), session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if destroyed != 1 || !sawDestroy {
+		t.Fatalf("destroyed=%d sawDestroy=%v, want 1", destroyed, sawDestroy)
+	}
+}
+
 func TestPublicSessionIncludesLastCheckStatus(t *testing.T) {
 	checkedAt := time.Date(2026, 6, 21, 23, 0, 0, 0, time.UTC)
 	session := ICloudSession{
@@ -916,6 +974,143 @@ func TestMailboxCodeQueryAcceptsOnlyPerMailboxToken(t *testing.T) {
 	}
 	if !body.Success || body.Code != "135790" {
 		t.Fatalf("code body = %+v", body)
+	}
+}
+
+func TestMailboxCodeQuerySyncsBeforeReturningCachedOldCode(t *testing.T) {
+	oldInterval := mailboxMailSyncMinInterval
+	mailboxMailSyncMinInterval = 0
+	t.Cleanup(func() { mailboxMailSyncMinInterval = oldInterval })
+	oldDebounce := mailboxCodePollDebounce
+	mailboxCodePollDebounce = 0
+	t.Cleanup(func() { mailboxCodePollDebounce = oldDebounce })
+
+	store := newTestStore(t)
+	ownerID := "owner-code-fresh"
+	if err := store.SaveICloudSessionForOwner(ownerID, ICloudSession{
+		OwnerID: ownerID,
+		DSID:    "123",
+		Cookies: []SessionCookie{{Name: "session", Value: "x"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := store.AddMailboxForOwner(ownerID, "", "UPI-1", "alias@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMessage(mailbox.ID, "ChatGPT code", "noreply@example.com", "Use 111111 to continue.", time.Now().Add(-30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewServer(Config{}, store, discardLogger())
+	server := handler.(*Server)
+	var calls int64
+	server.syncMailboxBatch = func(ctx context.Context, session ICloudSession, mailboxes []Mailbox, after time.Time, keyword string, maxThreads int) (map[string][]ICloudSyncedMessage, error) {
+		atomic.AddInt64(&calls, 1)
+		return map[string][]ICloudSyncedMessage{
+			mailbox.ID: {{
+				RemoteID:   "remote-new",
+				UID:        "2",
+				Subject:    "ChatGPT code",
+				Body:       "Use 222222 to continue.",
+				ReceivedAt: time.Now(),
+			}},
+		}, nil
+	}
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/mailboxes/"+url.PathEscape(mailbox.Email)+"/code?key="+mailbox.APIToken, nil)
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("code request = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		Success   bool   `json:"success"`
+		Code      string `json:"code"`
+		MessageID string `json:"message_id"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Success || body.Code != "222222" {
+		t.Fatalf("code body = %+v, want fresh 222222", body)
+	}
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Fatalf("sync calls = %d, want 1", got)
+	}
+	updated, ok := store.FindMailboxByID(mailbox.ID)
+	if !ok {
+		t.Fatal("mailbox missing")
+	}
+	if updated.LastCodeMessageID == "" || updated.LastCodeMessageID != body.MessageID {
+		t.Fatalf("LastCodeMessageID=%q response message_id=%q", updated.LastCodeMessageID, body.MessageID)
+	}
+}
+
+func TestMailboxCodeQueryDoesNotRepeatServedCachedCode(t *testing.T) {
+	oldInterval := mailboxMailSyncMinInterval
+	mailboxMailSyncMinInterval = 0
+	t.Cleanup(func() { mailboxMailSyncMinInterval = oldInterval })
+	oldDebounce := mailboxCodePollDebounce
+	mailboxCodePollDebounce = 0
+	t.Cleanup(func() { mailboxCodePollDebounce = oldDebounce })
+
+	store := newTestStore(t)
+	ownerID := "owner-code-repeat"
+	if err := store.SaveICloudSessionForOwner(ownerID, ICloudSession{
+		OwnerID: ownerID,
+		DSID:    "123",
+		Cookies: []SessionCookie{{Name: "session", Value: "x"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := store.AddMailboxForOwner(ownerID, "", "UPI-1", "alias@icloud.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddMessage(mailbox.ID, "ChatGPT code", "noreply@example.com", "Use 135790 to continue.", time.Now().Add(-30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewServer(Config{}, store, discardLogger())
+	server := handler.(*Server)
+	server.syncMailboxBatch = func(ctx context.Context, session ICloudSession, mailboxes []Mailbox, after time.Time, keyword string, maxThreads int) (map[string][]ICloudSyncedMessage, error) {
+		return map[string][]ICloudSyncedMessage{}, nil
+	}
+
+	requestCode := func(query string) struct {
+		Success bool   `json:"success"`
+		Code    string `json:"code"`
+		Error   string `json:"error"`
+	} {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/mailboxes/"+url.PathEscape(mailbox.Email)+"/code?key="+mailbox.APIToken+query, nil)
+		handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("code request %q = %d body=%s", query, rr.Code, rr.Body.String())
+		}
+		var body struct {
+			Success bool   `json:"success"`
+			Code    string `json:"code"`
+			Error   string `json:"error"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	first := requestCode("")
+	if !first.Success || first.Code != "135790" {
+		t.Fatalf("first code = %+v, want 135790", first)
+	}
+	second := requestCode("")
+	if second.Success || second.Code != "no_code" {
+		t.Fatalf("second code = %+v, want no_code without repeating cached OTP", second)
+	}
+	cached := requestCode("&cache=1")
+	if !cached.Success || cached.Code != "135790" {
+		t.Fatalf("cache code = %+v, want cached 135790", cached)
 	}
 }
 

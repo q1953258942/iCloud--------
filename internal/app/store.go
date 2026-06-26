@@ -614,6 +614,27 @@ func (s *FileStore) SetMailboxSyncCursor(id string, syncedAt time.Time, lastUID 
 	return s.state.Mailboxes[idx], s.saveLocked()
 }
 
+func (s *FileStore) SetMailboxLastCode(id string, messageID string, servedAt time.Time) (Mailbox, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := s.mailboxIndexLocked(id)
+	if idx < 0 {
+		return Mailbox{}, errCode("mailbox_not_found", "邮箱不存在", false)
+	}
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" {
+		return Mailbox{}, errCode("message_id_missing", "验证码邮件 ID 为空", false)
+	}
+	if servedAt.IsZero() {
+		servedAt = time.Now()
+	}
+	s.state.Mailboxes[idx].LastCodeMessageID = messageID
+	s.state.Mailboxes[idx].LastCodeAt = servedAt
+	s.state.Mailboxes[idx].UpdatedAt = time.Now()
+	return s.state.Mailboxes[idx], s.saveLocked()
+}
+
 func (s *FileStore) DeleteMailbox(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

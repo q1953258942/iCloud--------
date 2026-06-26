@@ -68,11 +68,13 @@ type syncICloudMailboxResult struct {
 }
 
 type mailboxCodeWaiter struct {
-	ctx       context.Context
-	mailboxID string
-	after     time.Time
-	keyword   string
-	result    chan mailboxCodeResult
+	ctx           context.Context
+	mailboxID     string
+	after         time.Time
+	keyword       string
+	forceSync     bool
+	skipMessageID string
+	result        chan mailboxCodeResult
 }
 
 type mailboxCodeResult struct {
@@ -151,10 +153,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/accounts", s.handleCreateAccount)
 	s.mux.HandleFunc("GET /api/mailboxes", s.handleListMailboxes)
 	s.mux.HandleFunc("POST /api/mailboxes", s.handleCreateMailbox)
+	s.mux.HandleFunc("POST /api/mailboxes/remote-clean", s.handleCleanRemoteMailboxes)
 	s.mux.HandleFunc("POST /api/mailboxes/{id}/verify", s.handleVerifyMailbox)
 	s.mux.HandleFunc("POST /api/mailboxes/{id}/disable", s.handleDisableMailbox)
 	s.mux.HandleFunc("POST /api/mailboxes/{id}/status", s.handleSetMailboxStatus)
 	s.mux.HandleFunc("POST /api/mailboxes/{id}/sync", s.handleSyncMailbox)
+	s.mux.HandleFunc("POST /api/mailboxes/{id}/remote-clean", s.handleCleanRemoteMailbox)
 	s.mux.HandleFunc("DELETE /api/mailboxes/{id}", s.handleDeleteMailbox)
 	s.mux.HandleFunc("GET /api/mailboxes/{id}/messages", s.handleListMessages)
 	s.mux.HandleFunc("POST /api/mailboxes/{id}/messages", s.handleCreateMessage)
@@ -1085,6 +1089,127 @@ func (s *Server) handleSyncMailbox(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "synced": count})
 }
 
+func (s *Server) handleCleanRemoteMailbox(w http.ResponseWriter, r *http.Request) {
+	mailbox, ok := s.store.FindMailboxByID(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, errCode("mailbox_not_found", "邮箱不存在", false))
+		return
+	}
+	if !s.canAccessMailbox(r, mailbox) {
+		writeError(w, http.StatusNotFound, errCode("mailbox_not_found", "邮箱不存在", false))
+		return
+	}
+	var payload struct {
+		MoveSynced bool `json:"move_synced"`
+		EmptyTrash bool `json:"empty_trash"`
+	}
+	if err := decodeJSON(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if !payload.MoveSynced && !payload.EmptyTrash {
+		payload.MoveSynced = true
+	}
+	session, ok := s.sessionForMailbox(mailbox.OwnerID, mailbox.AccountID)
+	if !ok {
+		writeError(w, http.StatusBadRequest, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先协议登录", true))
+		return
+	}
+
+	client := NewICloudClient()
+	result := ICloudMailCleanupResult{}
+	if payload.MoveSynced {
+		remoteIDs := icloudRemoteIDsFromMessages(s.store.MessagesForMailbox(mailbox.ID))
+		moved, err := client.MoveRemoteMessagesToTrash(r.Context(), session, remoteIDs)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+		result.MovedToTrash += moved.MovedToTrash
+		result.Skipped += moved.Skipped
+	}
+	if payload.EmptyTrash {
+		destroyed, err := client.EmptyTrash(r.Context(), session)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+		result.Destroyed = destroyed
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "cleanup": result})
+}
+
+func (s *Server) handleCleanRemoteMailboxes(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		AccountID  string `json:"account_id"`
+		MoveSynced bool   `json:"move_synced"`
+		EmptyTrash bool   `json:"empty_trash"`
+	}
+	if err := decodeJSON(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if !payload.MoveSynced && !payload.EmptyTrash {
+		payload.MoveSynced = true
+		payload.EmptyTrash = true
+	}
+	accountID := strings.TrimSpace(payload.AccountID)
+	if accountID != "" && !s.canAccessAccountID(r, accountID) {
+		writeError(w, http.StatusNotFound, errCode("account_not_found", "账号不存在", false))
+		return
+	}
+
+	state := s.scopedState(r)
+	client := NewICloudClient()
+	result := ICloudMailCleanupResult{}
+	cleanedSessions := map[string]bool{}
+	handledMailboxes := 0
+	failedMailboxes := 0
+	for _, mailbox := range state.Mailboxes {
+		if accountID != "" && !constantTimeEqual(accountID, strings.TrimSpace(mailbox.AccountID)) {
+			continue
+		}
+		if !mailbox.ICloudActive || mailbox.Status == StatusDisabled {
+			result.Skipped++
+			continue
+		}
+		session, ok := s.sessionForMailbox(mailbox.OwnerID, mailbox.AccountID)
+		if !ok {
+			result.Skipped++
+			continue
+		}
+		sessionKey := firstNonEmpty(session.OwnerID, mailbox.OwnerID, "__legacy__") + ":" + firstNonEmpty(session.AccountID, session.DSID, session.AppleID, mailbox.AccountID, "__session__")
+		if payload.MoveSynced {
+			remoteIDs := icloudRemoteIDsFromMessages(s.store.MessagesForMailbox(mailbox.ID))
+			moved, err := client.MoveRemoteMessagesToTrash(r.Context(), session, remoteIDs)
+			if err != nil {
+				s.logger.Warn("remote mail cleanup move failed", "mailbox_id", mailbox.ID, "err", err)
+				failedMailboxes++
+				continue
+			}
+			result.MovedToTrash += moved.MovedToTrash
+			result.Skipped += moved.Skipped
+		}
+		handledMailboxes++
+		if payload.EmptyTrash && !cleanedSessions[sessionKey] {
+			destroyed, err := client.EmptyTrash(r.Context(), session)
+			if err != nil {
+				s.logger.Warn("remote mail cleanup empty trash failed", "account_id", mailbox.AccountID, "err", err)
+				failedMailboxes++
+				continue
+			}
+			result.Destroyed += destroyed
+			cleanedSessions[sessionKey] = true
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":          true,
+		"cleanup":          result,
+		"mailboxes":        handledMailboxes,
+		"failed_mailboxes": failedMailboxes,
+	})
+}
+
 func (s *Server) handleDeleteMailbox(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !s.canAccessMailboxID(r, id) {
@@ -1204,22 +1329,31 @@ func (s *Server) writeMailboxCode(w http.ResponseWriter, r *http.Request, mailbo
 	now := time.Now()
 	codeAfter := mailboxCodeAfter(after, now)
 	allowStale := truthy(r.URL.Query().Get("allow_stale"))
-	if msg, code, ok := latestMailboxCode(s.store.MessagesForMailbox(mailbox.ID), codeAfter, keyword, now); ok {
-		s.writeMailboxCodeSuccess(w, mailbox, msg, code, "")
+	cacheOnly := truthy(r.URL.Query().Get("cache"))
+	if cacheOnly {
+		if msg, code, ok := latestMailboxCode(s.store.MessagesForMailbox(mailbox.ID), codeAfter, keyword, now); ok {
+			s.writeMailboxCodeSuccess(w, mailbox, msg, code, "", false)
+			return
+		}
+		writeError(w, http.StatusOK, errCode("no_code", "暂未收到验证码", true))
+		return
+	}
+	if msg, code, ok := latestMailboxCodeSkipping(s.store.MessagesForMailbox(mailbox.ID), after, keyword, now, mailbox.LastCodeMessageID); ok && !after.IsZero() {
+		s.writeMailboxCodeSuccess(w, mailbox, msg, code, "", true)
 		return
 	}
 
-	result := s.waitMailboxCode(r.Context(), mailbox, codeAfter, keyword)
+	result := s.waitMailboxCode(r.Context(), mailbox, codeAfter, keyword, true, mailbox.LastCodeMessageID)
 	if result.syncErr != nil {
 		s.logger.Warn("icloud sync failed", "mailbox_id", mailbox.ID, "err", result.syncErr)
 	}
 	if result.ok {
-		s.writeMailboxCodeSuccess(w, mailbox, result.message, result.code, staleCacheMessage(result.syncErr))
+		s.writeMailboxCodeSuccess(w, mailbox, result.message, result.code, staleCacheMessage(result.syncErr), true)
 		return
 	}
 	if result.syncErr != nil && allowStale {
-		if msg, code, ok := latestMailboxCode(s.store.MessagesForMailbox(mailbox.ID), codeAfter, keyword, time.Now()); ok {
-			s.writeMailboxCodeSuccess(w, mailbox, msg, code, "iCloud 同步失败，当前验证码来自本地缓存")
+		if msg, code, ok := latestMailboxCodeSkipping(s.store.MessagesForMailbox(mailbox.ID), codeAfter, keyword, time.Now(), mailbox.LastCodeMessageID); ok {
+			s.writeMailboxCodeSuccess(w, mailbox, msg, code, "iCloud 同步失败，当前验证码来自本地缓存", true)
 			return
 		}
 	}
@@ -1230,7 +1364,14 @@ func (s *Server) writeMailboxCode(w http.ResponseWriter, r *http.Request, mailbo
 	writeError(w, http.StatusOK, errCode("no_code", "暂未收到验证码", true))
 }
 
-func (s *Server) writeMailboxCodeSuccess(w http.ResponseWriter, mailbox Mailbox, msg Message, code string, staleMessage string) {
+func (s *Server) writeMailboxCodeSuccess(w http.ResponseWriter, mailbox Mailbox, msg Message, code string, staleMessage string, markServed bool) {
+	if markServed {
+		if _, err := s.store.SetMailboxLastCode(mailbox.ID, msg.ID, time.Now()); err != nil {
+			s.logger.Warn("remember mailbox code failed", "mailbox_id", mailbox.ID, "message_id", msg.ID, "err", err)
+			writeError(w, http.StatusInternalServerError, errCode("remember_code_failed", "保存验证码发放记录失败，请稍后重试", true))
+			return
+		}
+	}
 	payload := map[string]any{
 		"success":     true,
 		"email":       mailbox.Email,
@@ -1265,10 +1406,15 @@ func mailboxCodeAfter(after, now time.Time) time.Time {
 }
 
 func latestMailboxCode(messages []Message, after time.Time, keyword string, now time.Time) (Message, string, bool) {
+	return latestMailboxCodeSkipping(messages, after, keyword, now, "")
+}
+
+func latestMailboxCodeSkipping(messages []Message, after time.Time, keyword string, now time.Time, skipMessageID string) (Message, string, bool) {
 	keyword = strings.TrimSpace(keyword)
 	if keyword == "" {
 		keyword = "OpenAI"
 	}
+	skipMessageID = strings.TrimSpace(skipMessageID)
 	after = mailboxCodeAfter(after, now)
 	sort.SliceStable(messages, func(i, j int) bool {
 		left := firstNonZeroTime(messages[i].ReceivedAt, messages[i].CreatedAt)
@@ -1276,6 +1422,9 @@ func latestMailboxCode(messages []Message, after time.Time, keyword string, now 
 		return left.After(right)
 	})
 	for _, msg := range messages {
+		if skipMessageID != "" && msg.ID == skipMessageID {
+			continue
+		}
 		msgTime := firstNonZeroTime(msg.ReceivedAt, msg.CreatedAt)
 		if msgTime.IsZero() || msgTime.Before(after) {
 			continue
@@ -1302,13 +1451,15 @@ func truthy(value string) bool {
 	}
 }
 
-func (s *Server) waitMailboxCode(ctx context.Context, mailbox Mailbox, after time.Time, keyword string) mailboxCodeResult {
+func (s *Server) waitMailboxCode(ctx context.Context, mailbox Mailbox, after time.Time, keyword string, forceSync bool, skipMessageID string) mailboxCodeResult {
 	waiter := &mailboxCodeWaiter{
-		ctx:       ctx,
-		mailboxID: mailbox.ID,
-		after:     after,
-		keyword:   keyword,
-		result:    make(chan mailboxCodeResult, 1),
+		ctx:           ctx,
+		mailboxID:     mailbox.ID,
+		after:         after,
+		keyword:       keyword,
+		forceSync:     forceSync,
+		skipMessageID: skipMessageID,
+		result:        make(chan mailboxCodeResult, 1),
 	}
 	ownerKey := mailboxSyncOwnerKey(mailbox.OwnerID)
 	s.mailboxCodeMu.Lock()
@@ -1357,10 +1508,12 @@ func (s *Server) resolveMailboxCodeWaiters(ownerID string, waiters []*mailboxCod
 	}
 	pending := make([]*mailboxCodeWaiter, 0, len(active))
 	for _, waiter := range active {
-		msg, code, ok := s.latestMailboxCodeForWaiter(waiter)
-		if ok {
-			deliverMailboxCodeResult(waiter, mailboxCodeResult{message: msg, code: code, ok: true})
-			continue
+		if !waiter.forceSync {
+			msg, code, ok := s.latestMailboxCodeForWaiter(waiter)
+			if ok {
+				deliverMailboxCodeResult(waiter, mailboxCodeResult{message: msg, code: code, ok: true})
+				continue
+			}
 		}
 		pending = append(pending, waiter)
 	}
@@ -1414,7 +1567,7 @@ func deliverMailboxCodeResult(waiter *mailboxCodeWaiter, result mailboxCodeResul
 }
 
 func (s *Server) latestMailboxCodeForWaiter(waiter *mailboxCodeWaiter) (Message, string, bool) {
-	return latestMailboxCode(s.store.MessagesForMailbox(waiter.mailboxID), waiter.after, waiter.keyword, time.Now())
+	return latestMailboxCodeSkipping(s.store.MessagesForMailbox(waiter.mailboxID), waiter.after, waiter.keyword, time.Now(), waiter.skipMessageID)
 }
 
 func (s *Server) syncMailboxesForCodeWaiters(ctx context.Context, ownerID string, waiters []*mailboxCodeWaiter) error {
@@ -1583,6 +1736,19 @@ func (s *Server) syncMailboxBatchForOwner(ctx context.Context, ownerID string, m
 		}
 	}
 	return nil
+}
+
+func icloudRemoteIDsFromMessages(messages []Message) []string {
+	ids := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		if extractOTP(msg.Subject+"\n"+msg.Body) == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(msg.RemoteID), "icloud:") {
+			ids = append(ids, msg.RemoteID)
+		}
+	}
+	return uniqueStrings(ids)
 }
 
 func (s *Server) acquireMailboxSyncSlot(ctx context.Context, ownerID string) (func(), error) {

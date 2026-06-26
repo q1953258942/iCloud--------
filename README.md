@@ -9,13 +9,15 @@
 - 账号密码注册/登录：第一个注册账号自动成为管理员，后续账号为普通用户。
 - 管理员数据管理：管理员可查看所有用户、iCloud 登录态和隐私邮箱；普通用户只能操作自己的数据。
 - Apple SRP 协议登录：后端发起 iCloud 登录，用户收到 2FA 后提交 6 位验证码保存登录态。
+- 多 Apple 登录态：同一平台账号可保存多个 Apple/iCloud 登录态，前端按账号 TAB 分开显示和操作。
 - 隐私邮箱创建：后端调用 iCloud Hide My Email `generate + reserve` 创建邮箱。
 - 批量创建：支持设置总数、并发数和创建间隔秒；默认每创建一个等待 30 秒，创建结果写入服务器状态文件。
 - 邮件同步：后端直接请求 iCloud Mail `mccgateway` 接口，同步最新验证码邮件。
 - 取码 API：每个隐私邮箱自动生成独立 `mailbox_key` 和 API 地址。
 - 自动取号 API：外部项目可用全局 `api_key` 领取可用邮箱，领取后自动标记为已使用。
 - 登录态检测：可手动检测 iCloud Mail 是否还能同步，也可在前端开启定时检测。
-- 数据导出：当前登录用户可导出自己有权访问的数据；管理员导出全量数据。
+- 数据导出：当前登录用户可导出自己有权访问的数据；管理员导出全量数据；邮箱/API 导出支持按 Apple 登录态筛选。
+- 瞬断重试：iCloud 登录后续步骤和 Hide My Email 列表同步遇到 EOF/timeout 等临时网络错误会短重试；2FA/OTP 校验不会重复提交。
 
 ## 目录结构
 
@@ -75,6 +77,8 @@ Copy-Item .\config.example.json .\config.json
 ```
 
 > 管理面板只支持账号密码登录；旧版 Admin Key 管理入口已移除。
+>
+> `data_path` 是唯一真实数据源，里面包含平台用户、Apple 登录态、隐私邮箱、邮件缓存和每个邮箱的 `mailbox_key`。部署、迁移或合并数据前必须先备份这个文件。
 
 ## 本地运行
 
@@ -112,19 +116,31 @@ http://127.0.0.1:8787/login
 
 密码只参与当前登录请求，不写入状态文件、不返回前端、不写日志。
 
+同一平台账号可以保存多个 Apple 登录态。保存成功后会生成一个内部 `account_id`，后续创建、同步、导出都会用这个 `account_id` 绑定数据；前端会用 TAB 展示不同 Apple 账号，避免多个账号的邮箱混在一起。
+
 ### 2. 创建隐私邮箱
 
 1. 登录态保存成功后，在 `协议创建邮箱` 区域填写标签、备注、总数、并发和创建间隔秒。
-2. 点击创建。
-3. 后端调用 iCloud Hide My Email 接口创建邮箱，并写入服务器状态文件。
-4. 每个邮箱会生成独立 API 地址和 `mailbox_key`。
+2. 选择要使用的 Apple 登录态 TAB。
+3. 点击创建。
+4. 后端调用 iCloud Hide My Email 接口创建邮箱，并写入服务器状态文件。
+5. 每个邮箱会生成独立 API 地址和 `mailbox_key`。
 
 默认创建间隔为 `30` 秒；批量时即使设置并发，也会在前端按全局间隔节流，保证两次创建请求之间至少等待配置的秒数。建议先用 `总数=1，并发=1` 验证账号权限，再按 `30-60` 秒间隔慢速创建，避免 iCloud 临时限流。
+
+创建结果会绑定当前 Apple 登录态：
+
+- `account_id`：内部账号 ID，用于数据归属和导出筛选。
+- `account_apple_id`：前端展示用的 Apple ID。
+- `account_label`：创建时填写的标签或 Apple ID。
+
+如果从 iCloud 同步已有 Hide My Email 地址，后端会按当前登录态写入对应 `account_id`，不会再放到“未绑定 Apple 账号”分组。
 
 ### 3. 同步邮件和取验证码
 
 - 面板可手动点击 `同步邮件`。
 - 对外取码 API 会先尝试同步 iCloud 最新邮件，再从本地状态中提取最新 6 位验证码。
+- 普通取码成功后会记录本次返回的邮件 ID；同一封验证码邮件不会被默认重复返回，避免重新发码后仍命中旧码。
 - 建议调用取码 API 时带 `after=<RFC3339>`，避免拿到历史旧码。
 
 ## 对外取码 API
@@ -149,6 +165,7 @@ GET /api/mailboxes/{id}/code?key=<mailbox_key>&after=<RFC3339>&keyword=OpenAI
 | `after` | 建议必填；只返回该时间之后的新验证码 |
 | `keyword` | 邮件关键词，默认 `OpenAI` |
 | `allow_stale` | 默认 false；只有排障时才建议打开，允许同步失败后回退本地缓存旧码 |
+| `cache` | 默认 false；设为 `1/true` 时只读本地缓存，允许查看已返回过的旧验证码，不触发 iCloud 同步 |
 
 成功响应：
 
@@ -219,8 +236,50 @@ Authorization: Bearer <api_key>
 - `导出数据` 会触发浏览器保存文件选择框；不支持 File System Access API 的浏览器会回退为默认下载。
 - `导出邮箱API` 支持 `txt/csv/tsv/jsonl`，TXT 每行 `邮箱----API`，其他格式每行一条邮箱 API 记录。
 - `只导出邮箱` 支持 `txt/csv/tsv/jsonl`，所有格式均保持一行一个邮箱记录。
+- 前端导出可选择 `当前 TAB 账号`、`全部登录态` 或指定 Apple 登录态。
 - 普通用户只能导出自己的登录态和隐私邮箱；管理员可导出全量数据。
 - 导出文件包含 iCloud Cookie 和邮箱 API token，属于敏感文件，不要发给无关人员。
+
+### 邮箱 API token 稳定性
+
+每个邮箱的 API token 存在 `data_path` 的 `mailboxes[].api_token` 字段里：
+
+- 正常重启服务、重新构建程序、更新前端或重启服务器，不会改变已有邮箱的 API token。
+- 修改 `public_base_url` 只会改变复制出来的 URL 前缀，不会改变 `key=` 后面的 token。
+- 只有删除/重建邮箱记录、手动修改状态文件、从其他机器覆盖 `state.json`、或以后实现“重置 API token”功能时，token 才会改变。
+- 如果部署时用本地 `state.json` 覆盖服务器旧数据，同邮箱的 `api_token` 可能被本地值覆盖，之前发出去的 API 地址会失效。
+
+### 安全合并状态文件
+
+跨机器迁移或把本地数据合并到服务器时，建议规则：
+
+1. 先备份服务器当前 `state.json`。
+2. 以邮箱地址 `email` 作为唯一匹配键。
+3. 服务器已有的邮箱记录必须优先保留服务器侧 `api_token`。
+4. 本地只更新标签、状态、归属账号、同步时间、邮件计数等元数据。
+5. 只有服务器不存在的新邮箱，才写入本地 `api_token`。
+6. 合并后检查文件权限，确保服务进程能读取。
+
+如果 token 被误覆盖，可以从部署前备份里按邮箱地址找回旧 `api_token`，再写回当前 `state.json`。
+
+### 导出接口参数
+
+前端按钮最终调用：
+
+```http
+GET /api/runtime/export-mailbox-apis?format=txt&account_id=<account_id>
+GET /api/runtime/export-mailbox-emails?format=txt&account_id=<account_id>
+```
+
+参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `format` | `txt`、`csv`、`tsv`、`jsonl` |
+| `account_id` | 可选；只导出指定 Apple 登录态创建/同步的邮箱 |
+| `owner_id` | 仅管理员可用；在账号数据管理页按平台用户过滤 |
+
+普通用户即使传入别人的 `owner_id` 也不会越权，后端仍按当前登录用户的数据范围导出。
 
 ## 服务器部署
 
@@ -233,6 +292,16 @@ Authorization: Bearer <api_key>
   shared/data/state.json
   backups/
 ```
+
+`shared/data/state.json` 推荐只允许服务用户读写，例如：
+
+```bash
+chown -R icloud-mail:icloud-mail /opt/icloud-privacy-mail/shared
+chmod 700 /opt/icloud-privacy-mail/shared/data
+chmod 600 /opt/icloud-privacy-mail/shared/data/state.json
+```
+
+如果部署后页面空白、登录态丢失或日志出现 `permission denied`，优先检查 `state.json` 的属主和权限。
 
 构建 Linux amd64：
 
