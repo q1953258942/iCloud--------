@@ -2261,11 +2261,7 @@ func (s *Server) createICloudMailboxRemote(ctx context.Context, ownerID string, 
 }
 
 func (s *Server) createICloudMailboxRemoteWithChannel(ctx context.Context, ownerID string, session ICloudSession, label, note string, channel mailboxCreateChannel) (ICloudRemoteMailbox, error) {
-	key := strings.TrimSpace(ownerID)
-	if key == "" {
-		key = "global"
-	}
-	key += ":" + firstNonEmpty(session.AccountID, session.DSID, session.AppleID, "default")
+	key := mailboxCreateAccountKey(ownerID, session)
 
 	release, err := s.acquireMailboxCreateGate(ctx, key)
 	if err != nil {
@@ -2302,14 +2298,36 @@ func (s *Server) createICloudMailboxRemoteWithChannel(ctx context.Context, owner
 	return remote, err
 }
 
+func mailboxCreateAccountKey(ownerID string, session ICloudSession) string {
+	key := strings.TrimSpace(ownerID)
+	if key == "" {
+		key = "global"
+	}
+	key += ":" + firstNonEmpty(session.AccountID, session.DSID, session.AppleID, "default")
+	return key
+}
+
+func mailboxCreateChannelCooldownKey(accountKey string, channel mailboxCreateChannel) string {
+	key := strings.TrimSpace(accountKey)
+	if key == "" {
+		key = "global:default"
+	}
+	channel = normalizeMailboxCreateChannel(channel)
+	if channel == mailboxCreateChannelAuto {
+		channel = mailboxCreateChannelICloudWeb
+	}
+	return key + ":cooldown:" + string(channel)
+}
+
 func (s *Server) createICloudMailboxRemoteAppleAccount(ctx context.Context, ownerID string, session ICloudSession, label, note, key string) (ICloudRemoteMailbox, error) {
 	if _, ok := appleAccountLoginState(session); !ok {
 		return ICloudRemoteMailbox{}, errCode("apple_account_session_missing", "未保存新接口登录态，请先完成新接口登录", true)
 	}
+	cooldownKey := mailboxCreateChannelCooldownKey(key, mailboxCreateChannelAppleAccount)
 	remote, updatedSession, err := NewICloudClient().CreatePrivacyMailboxWithAppleAccount(ctx, session, s.cfg.AppleAccountAPIKey, label, note)
 	s.markMailboxCreateFinished(key)
 	if isCodedError(err, "apple_account_hme_limit") {
-		s.markMailboxCreateCooldown(key, mailboxCreateLimitCooldown)
+		s.markMailboxCreateCooldown(cooldownKey, mailboxCreateLimitCooldown)
 	}
 	if _, ok := appleAccountLoginState(updatedSession); ok {
 		if saveErr := s.store.SaveICloudSessionForOwner(ownerID, updatedSession); saveErr != nil {
@@ -2323,7 +2341,8 @@ func (s *Server) createICloudMailboxRemoteICloudWeb(ctx context.Context, session
 	if !iCloudWebLoginSaved(session) {
 		return ICloudRemoteMailbox{}, errCode("icloud_session_missing", "未保存旧接口登录态，请先完成旧接口登录", true)
 	}
-	if cooldownRemaining := s.mailboxCreateCooldownRemaining(key); cooldownRemaining > 0 {
+	cooldownKey := mailboxCreateChannelCooldownKey(key, mailboxCreateChannelICloudWeb)
+	if cooldownRemaining := s.mailboxCreateCooldownRemaining(cooldownKey); cooldownRemaining > 0 {
 		remaining := int(cooldownRemaining.Round(time.Second).Seconds())
 		if remaining < 1 {
 			remaining = 1
@@ -2335,7 +2354,7 @@ func (s *Server) createICloudMailboxRemoteICloudWeb(ctx context.Context, session
 	s.markMailboxCreateFinished(key)
 	var coded codedError
 	if errors.As(err, &coded) && coded.code == "icloud_hme_limit" {
-		s.markMailboxCreateCooldown(key, mailboxCreateLimitCooldown)
+		s.markMailboxCreateCooldown(cooldownKey, mailboxCreateLimitCooldown)
 	}
 	return remote, err
 }

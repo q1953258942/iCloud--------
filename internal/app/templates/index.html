@@ -1608,12 +1608,13 @@
 
     function updateManageRefreshClocks() {
       document.querySelectorAll('.manage-refresh-clock').forEach(node => {
+        const accountID = node.dataset.accountId || '';
         const refreshAt = node.dataset.refreshAt || '';
         const text = manageRefreshText(refreshAt);
         node.textContent = `新接口刷新：${text}`;
         const due = !!refreshAt && text === '待自动刷新';
         node.classList.toggle('due', due);
-        if (due) scheduleManageRefreshStatusRefresh(refreshAt);
+        if (due && node.dataset.loginOk === '1') scheduleManageRefreshStatusRefresh(accountID, refreshAt);
       });
     }
 
@@ -1622,17 +1623,19 @@
       manageRefreshClockTimer = setInterval(updateManageRefreshClocks, 1000);
     }
 
-    function scheduleManageRefreshStatusRefresh(refreshAt) {
-      if (!refreshAt || manageRefreshStatusRequested.has(refreshAt) || manageRefreshStatusInFlight) return;
-      manageRefreshStatusRequested.add(refreshAt);
+    function scheduleManageRefreshStatusRefresh(accountID, refreshAt) {
+      if (!refreshAt || manageRefreshStatusInFlight) return;
+      const requestKey = `${accountID || 'account'}|${refreshAt}`;
+      if (manageRefreshStatusRequested.has(requestKey)) return;
+      manageRefreshStatusRequested.add(requestKey);
       manageRefreshStatusInFlight = true;
       setTimeout(() => {
         checkICloudSession({auto: true, source: 'manage_refresh'})
           .then(ok => {
-            if (!ok) manageRefreshStatusRequested.delete(refreshAt);
+            if (!ok || sessionsNeedRefreshTimeRetry(lastICloudSessions)) manageRefreshStatusRequested.delete(requestKey);
           })
           .catch(err => {
-            manageRefreshStatusRequested.delete(refreshAt);
+            manageRefreshStatusRequested.delete(requestKey);
             log('新接口刷新时间自动更新失败：' + err.message);
           })
           .finally(() => {
@@ -1643,10 +1646,11 @@
     }
 
     function appleAccountNeedsRefreshTimeRetry(session) {
+      const refreshAt = parseTimeValue(session && session.apple_account_next_refresh_at || '');
       return appleAccountLoginSaved(session) &&
         !!session.apple_account_login_checked &&
         !!session.apple_account_login_ok &&
-        !parseTimeValue(session.apple_account_next_refresh_at || '');
+        (!refreshAt || refreshAt.getTime() <= Date.now());
     }
 
     function sessionsNeedRefreshTimeRetry(sessions) {
@@ -1661,10 +1665,11 @@
       if (!appleAccountLoginSaved(session)) return '';
       const refreshAt = session.apple_account_next_refresh_at || '';
       const expiresAt = session.apple_account_manage_expires_at || '';
+      const loginOK = session.apple_account_login_checked && session.apple_account_login_ok ? '1' : '0';
       const title = refreshAt
         ? `下次刷新：${exactTimeText(refreshAt)}${expiresAt ? `；登录态到期：${exactTimeText(expiresAt)}` : ''}`
         : '新接口已登录，等待下次检测后显示刷新时间';
-      return `<span class="manage-refresh-clock" data-refresh-at="${esc(refreshAt)}" data-expires-at="${esc(expiresAt)}" title="${esc(title)}">新接口刷新：${esc(manageRefreshText(refreshAt))}</span>`;
+      return `<span class="manage-refresh-clock" data-account-id="${esc(session.account_id || '')}" data-login-ok="${loginOK}" data-refresh-at="${esc(refreshAt)}" data-expires-at="${esc(expiresAt)}" title="${esc(title)}">新接口刷新：${esc(manageRefreshText(refreshAt))}</span>`;
     }
 
     function loginStateChipMode(saved, checked, ok) {

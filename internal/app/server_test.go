@@ -3924,7 +3924,8 @@ func TestCreateAppleAccountMailboxKeepsRefreshedStateWhenCreateFails(t *testing.
 	defer ts.Close()
 	appleAccountManageBaseURL = ts.URL
 
-	_, err := server.createICloudMailboxRemoteAppleAccount(context.Background(), ownerID, session, "LAB", "", ownerID+":"+session.AccountID)
+	accountKey := mailboxCreateAccountKey(ownerID, session)
+	_, err := server.createICloudMailboxRemoteAppleAccount(context.Background(), ownerID, session, "LAB", "", accountKey)
 	if err == nil {
 		t.Fatal("create error = nil, want Apple Account limit error")
 	}
@@ -3940,8 +3941,11 @@ func TestCreateAppleAccountMailboxKeepsRefreshedStateWhenCreateFails(t *testing.
 	if !strings.Contains(cookie, "manage-cookie=ok") {
 		t.Fatalf("saved cookie header = %q, want last successful manage cookie", cookie)
 	}
-	if remaining := server.mailboxCreateCooldownRemaining(ownerID + ":" + session.AccountID); remaining <= 0 {
+	if remaining := server.mailboxCreateCooldownRemaining(mailboxCreateChannelCooldownKey(accountKey, mailboxCreateChannelAppleAccount)); remaining <= 0 {
 		t.Fatalf("apple account cooldown remaining = %v, want positive", remaining)
+	}
+	if remaining := server.mailboxCreateCooldownRemaining(mailboxCreateChannelCooldownKey(accountKey, mailboxCreateChannelICloudWeb)); remaining > 0 {
+		t.Fatalf("icloud web cooldown remaining = %v, want zero when only Apple Account hit limit", remaining)
 	}
 	wantPaths := []string{
 		"GET /account/manage/gs/ws/token",
