@@ -52,6 +52,7 @@ func NewICloudClient() *ICloudClient {
 }
 
 const mailboxSyncCursorOverlap = 2 * time.Minute
+const appleAccountManageCreateRefreshCooldown = 30 * time.Minute
 
 var appleAccountManageBaseURL = "https://appleid.apple.com"
 
@@ -128,6 +129,31 @@ func appleAccountManageReady(session ICloudSession) bool {
 	return ok && strings.TrimSpace(state.APIKey) != ""
 }
 
+func appleAccountManageNeedsCreateRefresh(loginState LoginState, now time.Time) bool {
+	if strings.TrimSpace(loginState.Scnt) == "" {
+		return true
+	}
+	if strings.TrimSpace(loginState.APIKey) == "" {
+		return true
+	}
+	if !loginState.LastCheckOK {
+		return true
+	}
+	if loginState.LastCheckedAt.IsZero() {
+		return true
+	}
+	return now.Sub(loginState.LastCheckedAt) >= appleAccountManageCreateRefreshCooldown
+}
+
+func markAppleAccountManageOK(loginState *LoginState) {
+	if loginState == nil {
+		return
+	}
+	loginState.LastCheckedAt = time.Now()
+	loginState.LastCheckOK = true
+	loginState.LastStatusMessage = "新接口登录态正常"
+}
+
 func (c *ICloudClient) CheckAppleAccountManageSession(ctx context.Context, session ICloudSession) (ICloudSession, error) {
 	loginState, ok := appleAccountLoginState(session)
 	if !ok {
@@ -177,12 +203,43 @@ func (c *ICloudClient) CreatePrivacyMailboxWithAppleAccount(ctx context.Context,
 		return ICloudRemoteMailbox{}, session, errCode("apple_account_session_missing", "当前登录态缺少 Apple Account 管理态，请重新协议登录", true)
 	}
 	fallbackAPIKey = strings.TrimSpace(fallbackAPIKey)
+	refreshedBeforeCreate := false
+	if appleAccountManageNeedsCreateRefresh(loginState, time.Now()) {
+		refreshedBeforeCreate = true
+		var err error
+		loginState, session, err = c.refreshAppleAccountManageStateForCreate(ctx, session, loginState, fallbackAPIKey)
+		if err != nil {
+			return ICloudRemoteMailbox{}, session, err
+		}
+	}
+
+	remote, updatedSession, err := c.createPrivacyMailboxWithAppleAccountState(ctx, session, loginState, fallbackAPIKey, label, note)
+	if err == nil || !isCodedError(err, "apple_account_auth_failed") || refreshedBeforeCreate {
+		return remote, updatedSession, err
+	}
+
+	retryState, ok := appleAccountLoginState(updatedSession)
+	if !ok {
+		retryState = loginState
+	}
+	retryState, updatedSession, refreshErr := c.refreshAppleAccountManageStateForCreate(ctx, updatedSession, retryState, fallbackAPIKey)
+	if refreshErr != nil {
+		return ICloudRemoteMailbox{}, updatedSession, refreshErr
+	}
+	return c.createPrivacyMailboxWithAppleAccountState(ctx, updatedSession, retryState, fallbackAPIKey, label, note)
+}
+
+func (c *ICloudClient) refreshAppleAccountManageStateForCreate(ctx context.Context, session ICloudSession, loginState LoginState, fallbackAPIKey string) (LoginState, ICloudSession, error) {
 	refreshed, err := c.RefreshAppleAccountManageState(ctx, loginState)
 	loginState = refreshed
 	session = withAppleAccountLoginState(session, loginState)
 	if err != nil && (fallbackAPIKey == "" || !isCodedError(err, "apple_account_api_key_missing")) {
-		return ICloudRemoteMailbox{}, session, err
+		return loginState, session, err
 	}
+	return loginState, session, nil
+}
+
+func (c *ICloudClient) createPrivacyMailboxWithAppleAccountState(ctx context.Context, session ICloudSession, loginState LoginState, fallbackAPIKey, label, note string) (ICloudRemoteMailbox, ICloudSession, error) {
 	apiKey := strings.TrimSpace(firstNonEmpty(loginState.APIKey, fallbackAPIKey))
 	if apiKey == "" {
 		return ICloudRemoteMailbox{}, session, errCode("apple_account_api_key_missing", "Apple Account 管理态缺少 api_key，请重新完成 Apple Account 登录流程", true)
@@ -246,10 +303,11 @@ func (c *ICloudClient) CreatePrivacyMailboxWithAppleAccount(ctx context.Context,
 			remote.IsActive = confirmed.Active
 		}
 	}
-	session = withAppleAccountLoginState(session, loginState)
 	if remote.Email == "" {
 		return ICloudRemoteMailbox{}, session, errCode("apple_account_create_empty", "Apple Account 创建后未返回隐私邮箱", true)
 	}
+	markAppleAccountManageOK(&loginState)
+	session = withAppleAccountLoginState(session, loginState)
 	return remote, session, nil
 }
 
@@ -265,6 +323,7 @@ func (c *ICloudClient) RefreshAppleAccountManageState(ctx context.Context, login
 	}
 	tokenScnt := strings.TrimSpace(loginState.Scnt)
 	if err := c.loadAppleAccountManageAPIKey(ctx, &loginState); err == nil {
+		markAppleAccountManageOK(&loginState)
 		return loginState, nil
 	}
 	if err := c.warmAppleAccountPortal(ctx, &loginState); err != nil {
@@ -286,6 +345,7 @@ func (c *ICloudClient) RefreshAppleAccountManageState(ctx context.Context, login
 	if err := c.loadAppleAccountManageAPIKey(ctx, &loginState); err != nil {
 		return loginState, err
 	}
+	markAppleAccountManageOK(&loginState)
 	return loginState, nil
 }
 

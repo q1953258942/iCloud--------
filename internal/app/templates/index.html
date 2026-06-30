@@ -1912,9 +1912,13 @@
         $('scheduleStatus').textContent = scheduler.last_error ? `${statusText}；最近错误：${scheduler.last_error}` : statusText;
       }
       setScheduleLog(events.length === 0 ? '暂无定时创建记录。' : events.slice(0, 30).map(event => {
-        const email = event.email ? ` ${event.email}` : '';
-        const err = event.error ? `；${event.error}` : '';
-        return `${event.at || '-'} [${event.type || '-'}] ${event.message || ''}${email}${err}`;
+        const message = String(event.message || '');
+        const eventEmail = String(event.email || '').trim();
+        const messageLower = message.toLowerCase();
+        const email = eventEmail && !messageLower.includes(eventEmail.toLowerCase()) ? ` ${eventEmail}` : '';
+        const eventError = String(event.error || '').trim();
+        const err = eventError && !message.includes(eventError) ? `；${eventError}` : '';
+        return `${event.at || '-'} [${event.type || '-'}] ${message}${email}${err}`;
       }).join('\n'));
       if (hasNewCreated && !options.silent) {
         log('定时创建有新邮箱成功，列表已准备刷新');
