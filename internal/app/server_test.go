@@ -743,6 +743,45 @@ func TestAppleAuthClientAuthStartPreservesAppleAccountCompleteHashcashChallenge(
 	}
 }
 
+func TestAppleAuthClientAuthFederateEnablesRememberMeForAppleAccountManage(t *testing.T) {
+	var body map[string]any
+	var rememberQuery string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/federate" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		rememberQuery = r.URL.Query().Get("isRememberMeEnabled")
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer ts.Close()
+
+	session := &appleAuthSession{
+		Endpoints: appleAuthEndpoints{
+			Home: "https://account.apple.com",
+			Auth: ts.URL,
+		},
+		AppleID:   "user@example.com",
+		ClientID:  appleAccountManageOAuthClientID,
+		UserAgent: appleAccountManageUserAgent,
+	}
+	client := &AppleAuthClient{httpClient: ts.Client()}
+	if err := client.authFederate(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+	if rememberQuery != "true" {
+		t.Fatalf("isRememberMeEnabled = %q, want true", rememberQuery)
+	}
+	if body["rememberMe"] != true {
+		t.Fatalf("rememberMe = %#v, want true", body["rememberMe"])
+	}
+	if body["accountName"] != "user@example.com" {
+		t.Fatalf("accountName = %#v, want user@example.com", body["accountName"])
+	}
+}
+
 func TestAppleAuthClientAuthSRPUsesPreservedAppleAccountHashcashAndBrowserBody(t *testing.T) {
 	var completeHashcash string
 	var completeBody map[string]any
@@ -797,8 +836,8 @@ func TestAppleAuthClientAuthSRPUsesPreservedAppleAccountHashcashAndBrowserBody(t
 	if !strings.Contains(completeHashcash, ":8:") || !strings.Contains(completeHashcash, ":initial-challenge::") {
 		t.Fatalf("X-Apple-HC = %q, want preserved initial challenge", completeHashcash)
 	}
-	if completeBody["rememberMe"] != false {
-		t.Fatalf("rememberMe = %#v, want false", completeBody["rememberMe"])
+	if completeBody["rememberMe"] != true {
+		t.Fatalf("rememberMe = %#v, want true", completeBody["rememberMe"])
 	}
 	if _, ok := completeBody["trustTokens"]; ok {
 		t.Fatalf("trustTokens present in Apple Account manage complete body: %#v", completeBody["trustTokens"])

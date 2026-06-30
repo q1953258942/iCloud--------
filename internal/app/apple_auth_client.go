@@ -503,11 +503,7 @@ func (c *AppleAuthClient) authDeviceKeyChallenge(ctx context.Context, session *a
 
 func (c *AppleAuthClient) authFederate(ctx context.Context, session *appleAuthSession) error {
 	u := session.Endpoints.Auth + "/federate?isRememberMeEnabled=true"
-	rememberMe := true
-	if session.isAppleAccountManage() {
-		rememberMe = false
-	}
-	body := map[string]any{"accountName": session.AppleID, "rememberMe": rememberMe}
+	body := map[string]any{"accountName": session.AppleID, "rememberMe": true}
 	_, _, err := c.do(ctx, session, http.MethodPost, u, session.srpHeaders(), body, nil, false)
 	return err
 }
@@ -546,11 +542,9 @@ func (c *AppleAuthClient) authSRP(ctx context.Context, session *appleAuthSession
 		"m1":          base64.StdEncoding.EncodeToString(srp.M1),
 		"m2":          base64.StdEncoding.EncodeToString(srp.M2),
 		"c":           initResp.C,
+		"rememberMe":  true,
 	}
-	if session.isAppleAccountManage() {
-		completeBody["rememberMe"] = false
-	} else {
-		completeBody["rememberMe"] = true
+	if !session.isAppleAccountManage() {
 		completeBody["trustTokens"] = []string{}
 		if session.TrustToken != "" {
 			completeBody["trustTokens"] = []string{session.TrustToken}
