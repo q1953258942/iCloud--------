@@ -1642,6 +1642,21 @@
       }, 300);
     }
 
+    function appleAccountNeedsRefreshTimeRetry(session) {
+      return appleAccountLoginSaved(session) &&
+        !!session.apple_account_login_checked &&
+        !!session.apple_account_login_ok &&
+        !parseTimeValue(session.apple_account_next_refresh_at || '');
+    }
+
+    function sessionsNeedRefreshTimeRetry(sessions) {
+      return (sessions || []).some(appleAccountNeedsRefreshTimeRetry);
+    }
+
+    function waitForManageRefreshRetryDelay() {
+      return new Promise(resolve => setTimeout(resolve, 1200));
+    }
+
     function sessionManageRefreshBadge(session) {
       if (!appleAccountLoginSaved(session)) return '';
       const refreshAt = session.apple_account_next_refresh_at || '';
@@ -1992,12 +2007,26 @@
       if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = checkingText;
       if ($('createSessionCheckStatus')) $('createSessionCheckStatus').textContent = autoManageRefresh ? '正在自动刷新...' : '正在检测...';
       try {
-        const data = await api('/api/icloud/session/check', {method:'POST', body:'{}'});
-        lastICloudSessions = data.sessions || (data.session && data.session.saved ? [data.session] : []);
-        renderICloudSessions(lastICloudSessions);
+        let data;
+        let retryCount = 0;
+        do {
+          if (retryCount > 0) {
+            if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = `新接口正常但未返回刷新时间，正在继续刷新第 ${retryCount + 1} 次...`;
+            if ($('createSessionCheckStatus')) $('createSessionCheckStatus').textContent = `继续刷新新接口时间，第 ${retryCount + 1} 次...`;
+            await waitForManageRefreshRetryDelay();
+          }
+          data = await api('/api/icloud/session/check', {method:'POST', body:'{}'});
+          lastICloudSessions = data.sessions || (data.session && data.session.saved ? [data.session] : []);
+          renderICloudSessions(lastICloudSessions);
+          retryCount++;
+        } while (sessionsNeedRefreshTimeRetry(lastICloudSessions));
+
+        const retried = retryCount > 1;
         if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = data.message || '登录态检测完成';
-        if ($('createSessionCheckStatus')) $('createSessionCheckStatus').textContent = autoManageRefresh ? '新接口刷新时间已自动更新。' : (data.message || '检测完成，账号状态已刷新。');
-        log(autoManageRefresh ? '新接口刷新时间已自动更新' : (data.message || '登录态检测正常：新旧接口状态已刷新'));
+        if ($('createSessionCheckStatus')) {
+          $('createSessionCheckStatus').textContent = autoManageRefresh || retried ? '新接口刷新时间已自动更新。' : (data.message || '检测完成，账号状态已刷新。');
+        }
+        log(autoManageRefresh || retried ? '新接口刷新时间已自动更新' : (data.message || '登录态检测正常：新旧接口状态已刷新'));
         return true;
       } catch (err) {
         if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '登录态检测失败；请按失败提示重新保存对应登录态。';
