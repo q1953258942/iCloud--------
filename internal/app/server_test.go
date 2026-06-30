@@ -605,6 +605,103 @@ func TestICloudClientAppleAccountGenerateEmptyIncludesRawBody(t *testing.T) {
 	}
 }
 
+func TestICloudClientCreatePrivacyMailboxWithAppleAccountRetriesNetworkErrors(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+	appleAccountManageBaseURL = "https://appleid.test"
+
+	addAttempts := 0
+	completeAttempts := 0
+	client := &ICloudClient{client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /account/manage/email/private/add":
+			addAttempts++
+			if addAttempts < 3 {
+				return nil, &url.Error{Op: "Post", URL: r.URL.String(), Err: context.DeadlineExceeded}
+			}
+			return appleAccountTestResponse(r, http.StatusOK, `{"emailAddress":"Retry.Alias@icloud.com"}`), nil
+		case "PUT /account/manage/email/private/add/complete":
+			completeAttempts++
+			return appleAccountTestResponse(r, http.StatusOK, `{"emailAddress":"Retry.Alias@icloud.com","label":"LAB","note":"note","active":true}`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			return nil, nil
+		}
+	})}}
+
+	remote, _, err := client.CreatePrivacyMailboxWithAppleAccount(t.Context(), appleAccountFreshSessionForTest(), "", "LAB", "note")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addAttempts != 3 {
+		t.Fatalf("add attempts = %d, want 3", addAttempts)
+	}
+	if completeAttempts != 1 {
+		t.Fatalf("complete attempts = %d, want 1", completeAttempts)
+	}
+	if remote.Email != "retry.alias@icloud.com" || remote.Origin != "APPLE_ACCOUNT" {
+		t.Fatalf("remote = %+v, want retry alias from Apple Account", remote)
+	}
+}
+
+func TestICloudClientCreatePrivacyMailboxWithAppleAccountDoesNotRetryHTTPError(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+	appleAccountManageBaseURL = "https://appleid.test"
+
+	addAttempts := 0
+	client := &ICloudClient{client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /account/manage/email/private/add":
+			addAttempts++
+			return appleAccountTestResponse(r, http.StatusInternalServerError, `<html><body>temporary</body></html>`), nil
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			return nil, nil
+		}
+	})}}
+
+	_, _, err := client.CreatePrivacyMailboxWithAppleAccount(t.Context(), appleAccountFreshSessionForTest(), "", "LAB", "note")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if addAttempts != 1 {
+		t.Fatalf("add attempts = %d, want 1", addAttempts)
+	}
+	if !isCodedError(err, "apple_account_api_failed") {
+		t.Fatalf("error = %#v, want apple_account_api_failed", err)
+	}
+}
+
+func appleAccountFreshSessionForTest() ICloudSession {
+	now := time.Now()
+	return ICloudSession{
+		OwnerID:   "owner-test",
+		AccountID: "account-test",
+		AppleID:   "apple-test@example.com",
+		LoginStates: []LoginState{{
+			Kind:            LoginStateAppleAccount,
+			Scnt:            "scnt-current",
+			APIKey:          "fresh-key",
+			LastCheckedAt:   now,
+			ManageExpiresAt: now.Add(15 * time.Minute),
+			LastCheckOK:     true,
+			Origin:          appleAccountManageOrigin,
+		}},
+	}
+}
+
+func appleAccountTestResponse(r *http.Request, status int, body string) *http.Response {
+	header := make(http.Header)
+	header.Set("Content-Type", "application/json")
+	return &http.Response{
+		StatusCode: status,
+		Header:     header,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    r,
+	}
+}
+
 func TestICloudClientCreatePrivacyMailboxWithAppleAccount(t *testing.T) {
 	oldBaseURL := appleAccountManageBaseURL
 	defer func() { appleAccountManageBaseURL = oldBaseURL }()

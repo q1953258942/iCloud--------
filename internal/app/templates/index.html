@@ -1627,9 +1627,18 @@
       manageRefreshStatusRequested.add(refreshAt);
       manageRefreshStatusInFlight = true;
       setTimeout(() => {
-        refresh()
-          .catch(err => log('新接口刷新时间自动更新失败：' + err.message))
-          .finally(() => { manageRefreshStatusInFlight = false; });
+        checkICloudSession({auto: true, source: 'manage_refresh'})
+          .then(ok => {
+            if (!ok) manageRefreshStatusRequested.delete(refreshAt);
+          })
+          .catch(err => {
+            manageRefreshStatusRequested.delete(refreshAt);
+            log('新接口刷新时间自动更新失败：' + err.message);
+          })
+          .finally(() => {
+            manageRefreshStatusInFlight = false;
+            updateManageRefreshClocks();
+          });
       }, 300);
     }
 
@@ -1973,24 +1982,29 @@
       }
     }
 
-    async function checkICloudSession() {
-      if (sessionCheckInFlight) return;
+    async function checkICloudSession(options = {}) {
+      if (sessionCheckInFlight) return false;
       sessionCheckInFlight = true;
       const buttons = ['sessionCheckButton', 'createCheckSessionButton'].map(id => $(id)).filter(Boolean);
       buttons.forEach(button => { button.disabled = true; });
-      if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '正在检测新接口和旧接口登录态...';
-      if ($('createSessionCheckStatus')) $('createSessionCheckStatus').textContent = '正在检测...';
+      const autoManageRefresh = options && options.source === 'manage_refresh';
+      const checkingText = autoManageRefresh ? '正在自动刷新新接口登录态...' : '正在检测新接口和旧接口登录态...';
+      if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = checkingText;
+      if ($('createSessionCheckStatus')) $('createSessionCheckStatus').textContent = autoManageRefresh ? '正在自动刷新...' : '正在检测...';
       try {
         const data = await api('/api/icloud/session/check', {method:'POST', body:'{}'});
-        renderICloudSessions(data.sessions || (data.session && data.session.saved ? [data.session] : []));
+        lastICloudSessions = data.sessions || (data.session && data.session.saved ? [data.session] : []);
+        renderICloudSessions(lastICloudSessions);
         if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = data.message || '登录态检测完成';
-        if ($('createSessionCheckStatus')) $('createSessionCheckStatus').textContent = data.message || '检测完成，账号状态已刷新。';
-        log(data.message || '登录态检测正常：新旧接口状态已刷新');
+        if ($('createSessionCheckStatus')) $('createSessionCheckStatus').textContent = autoManageRefresh ? '新接口刷新时间已自动更新。' : (data.message || '检测完成，账号状态已刷新。');
+        log(autoManageRefresh ? '新接口刷新时间已自动更新' : (data.message || '登录态检测正常：新旧接口状态已刷新'));
+        return true;
       } catch (err) {
         if ($('sessionCheckStatus')) $('sessionCheckStatus').textContent = '登录态检测失败；请按失败提示重新保存对应登录态。';
         if ($('createSessionCheckStatus')) $('createSessionCheckStatus').textContent = '检测失败，请查看运行日志。';
         log('登录态检测失败：' + err.message + '；请按失败提示重新保存对应登录态');
         await refresh().catch(() => {});
+        throw err;
       } finally {
         buttons.forEach(button => { button.disabled = false; });
         sessionCheckInFlight = false;

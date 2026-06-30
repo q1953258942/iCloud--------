@@ -475,6 +475,19 @@ func (c *ICloudClient) warmAppleAccountPortal(ctx context.Context, loginState *L
 }
 
 func (c *ICloudClient) callAppleAccountPortal(ctx context.Context, loginState *LoginState, path, accept string, jsonContent bool, secFetchDest, secFetchMode string) ([]byte, error) {
+	var data []byte
+	err := retryAppleTransient(ctx, func() error {
+		next, err := c.callAppleAccountPortalOnce(ctx, loginState, path, accept, jsonContent, secFetchDest, secFetchMode)
+		if err != nil {
+			return err
+		}
+		data = next
+		return nil
+	})
+	return data, err
+}
+
+func (c *ICloudClient) callAppleAccountPortalOnce(ctx context.Context, loginState *LoginState, path, accept string, jsonContent bool, secFetchDest, secFetchMode string) ([]byte, error) {
 	if loginState == nil {
 		return nil, errCode("apple_account_session_missing", "当前登录态缺少 Apple Account 管理态，请重新协议登录", true)
 	}
@@ -631,6 +644,21 @@ type appleAccountRawResponse struct {
 }
 
 func (c *ICloudClient) fetchAppleAccountManageTokenScnt(ctx context.Context, loginState LoginState, result any) (string, error) {
+	var scnt string
+	err := retryAppleTransient(ctx, func() error {
+		next, err := c.fetchAppleAccountManageTokenScntOnce(ctx, loginState, result)
+		if strings.TrimSpace(next) != "" {
+			scnt = next
+		}
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	return scnt, err
+}
+
+func (c *ICloudClient) fetchAppleAccountManageTokenScntOnce(ctx context.Context, loginState LoginState, result any) (string, error) {
 	base, err := url.Parse(strings.TrimRight(appleAccountManageBaseForState(loginState), "/") + "/")
 	if err != nil {
 		return "", err
@@ -683,6 +711,19 @@ func (c *ICloudClient) fetchAppleAccountManageTokenScnt(ctx context.Context, log
 }
 
 func (c *ICloudClient) callAppleAccountRaw(ctx context.Context, loginState *LoginState, apiKey, method, path string, body any, result any) (appleAccountRawResponse, error) {
+	var raw appleAccountRawResponse
+	err := retryAppleTransient(ctx, func() error {
+		next, err := c.callAppleAccountRawOnce(ctx, loginState, apiKey, method, path, body, result)
+		if err != nil {
+			return err
+		}
+		raw = next
+		return nil
+	})
+	return raw, err
+}
+
+func (c *ICloudClient) callAppleAccountRawOnce(ctx context.Context, loginState *LoginState, apiKey, method, path string, body any, result any) (appleAccountRawResponse, error) {
 	if loginState == nil {
 		return appleAccountRawResponse{}, errCode("apple_account_session_missing", "当前登录态缺少 Apple Account 管理态，请重新协议登录", true)
 	}

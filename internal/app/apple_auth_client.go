@@ -1007,6 +1007,10 @@ func isAppleTransientNetworkError(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return false
 	}
+	var coded codedError
+	if errors.As(err, &coded) {
+		return false
+	}
 	if errors.Is(err, io.EOF) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
@@ -1018,8 +1022,14 @@ func isAppleTransientNetworkError(err error) bool {
 	for _, marker := range []string{
 		"eof",
 		"timeout",
+		"i/o timeout",
+		"no such host",
+		"temporary failure in name resolution",
+		"network is unreachable",
+		"no route to host",
 		"connection reset",
 		"connection refused",
+		"connection aborted",
 		"server closed idle connection",
 		"tls handshake timeout",
 	} {
