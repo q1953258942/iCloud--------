@@ -2526,6 +2526,89 @@ func TestMailboxSchedulerSkipsFailedAccountWithinCurrentBatch(t *testing.T) {
 	}
 }
 
+func TestMailboxSchedulerFallsBackToOldInterfaceAfterNewInterfaceFails(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewServer(Config{PublicBaseURL: "https://mail.example"}, store, discardLogger())
+	server := handler.(*Server)
+	ownerID := "owner-scheduler-fallback"
+	if err := store.SaveICloudSessionForOwner(ownerID, ICloudSession{
+		OwnerID:            ownerID,
+		AppleID:            "fallback@example.com",
+		DSID:               "dsid-fallback",
+		PremiumMailBaseURL: "https://example.invalid",
+		IsICloudPlus:       true,
+		CanCreateHME:       true,
+		Cookies:            []SessionCookie{{Name: "X-APPLE-WEBAUTH", Value: "cookie", Domain: ".icloud.com", Path: "/"}},
+		LoginStates: []LoginState{
+			{Kind: LoginStateAppleAccount, Host: "appleid.apple.com", Origin: "https://account.apple.com", Scnt: "scnt", SessionID: "sid"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessions := store.ICloudSessionsForOwner(ownerID)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	accountID := sessions[0].AccountID
+
+	var attemptsMu sync.Mutex
+	attempts := map[mailboxCreateChannel]int{}
+	server.createMailboxForOwner = func(ctx context.Context, ownerID, accountID, label, note string) (Mailbox, ICloudRemoteMailbox, error) {
+		channel := mailboxCreateChannelFromContext(ctx)
+		attemptsMu.Lock()
+		attempts[channel]++
+		attempt := attempts[channel]
+		attemptsMu.Unlock()
+		switch channel {
+		case mailboxCreateChannelAppleAccount:
+			if attempt > 2 {
+				return Mailbox{}, ICloudRemoteMailbox{}, errCode("apple_account_limit", "新接口当前小时额度已用完", true)
+			}
+		case mailboxCreateChannelICloudWeb:
+			if attempt > 1 {
+				return Mailbox{}, ICloudRemoteMailbox{}, errCode("icloud_hme_limit", "旧接口当前小时额度已用完", true)
+			}
+		default:
+			return Mailbox{}, ICloudRemoteMailbox{}, errCode("unexpected_channel", "定时创建没有指定接口", false)
+		}
+		email := fmt.Sprintf("%s-%d@icloud.com", channel, attempt)
+		mailbox, err := store.AddMailboxForOwner(ownerID, accountID, label, email)
+		if err != nil {
+			return Mailbox{}, ICloudRemoteMailbox{}, err
+		}
+		return mailbox, ICloudRemoteMailbox{Email: mailbox.Email, Label: mailbox.Label, IsActive: true, Origin: string(channel)}, nil
+	}
+
+	job := &mailboxSchedulerJob{state: mailboxSchedulerState{Running: true, BatchSize: 1}}
+	server.runMailboxSchedulerBatch(context.Background(), ownerID, job, mailboxSchedulerConfig{
+		AccountIDs: []string{accountID},
+		Label:      "SCH",
+		BatchSize:  1,
+	}, 1)
+	state, events := job.snapshot()
+	attemptsMu.Lock()
+	defer attemptsMu.Unlock()
+	if attempts[mailboxCreateChannelAppleAccount] != 3 {
+		t.Fatalf("new interface attempts = %d, want 3; attempts=%+v", attempts[mailboxCreateChannelAppleAccount], attempts)
+	}
+	if attempts[mailboxCreateChannelICloudWeb] != 2 {
+		t.Fatalf("old interface attempts = %d, want 2; attempts=%+v", attempts[mailboxCreateChannelICloudWeb], attempts)
+	}
+	if state.Success != 3 || state.Failed != 1 {
+		t.Fatalf("scheduler state = %+v, want success=3 failed=1", state)
+	}
+	var sawSwitch bool
+	for _, event := range events {
+		if event.Type == "channel_failed" && strings.Contains(event.Message, "切换旧接口继续尝试") {
+			sawSwitch = true
+			break
+		}
+	}
+	if !sawSwitch {
+		t.Fatalf("events did not include old-interface fallback: %+v", events)
+	}
+}
+
 func TestSaveICloudSessionForOwnerKeepsMultipleAppleAccounts(t *testing.T) {
 	store := newTestStore(t)
 	ownerID := "owner-multi"

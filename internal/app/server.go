@@ -56,7 +56,56 @@ type Server struct {
 type createMailboxFailure struct {
 	AccountID string `json:"account_id,omitempty"`
 	AppleID   string `json:"apple_id,omitempty"`
+	Channel   string `json:"channel,omitempty"`
 	Error     string `json:"error"`
+}
+
+type mailboxCreateChannel string
+
+const (
+	mailboxCreateChannelAuto         mailboxCreateChannel = ""
+	mailboxCreateChannelAppleAccount mailboxCreateChannel = "apple_account"
+	mailboxCreateChannelICloudWeb    mailboxCreateChannel = "icloud_web"
+)
+
+type mailboxCreateChannelContextKey struct{}
+
+type mailboxCreateRequest struct {
+	AccountID string
+	Channel   mailboxCreateChannel
+}
+
+func contextWithMailboxCreateChannel(ctx context.Context, channel mailboxCreateChannel) context.Context {
+	channel = normalizeMailboxCreateChannel(channel)
+	if channel == mailboxCreateChannelAuto {
+		return ctx
+	}
+	return context.WithValue(ctx, mailboxCreateChannelContextKey{}, channel)
+}
+
+func mailboxCreateChannelFromContext(ctx context.Context) mailboxCreateChannel {
+	channel, _ := ctx.Value(mailboxCreateChannelContextKey{}).(mailboxCreateChannel)
+	return normalizeMailboxCreateChannel(channel)
+}
+
+func normalizeMailboxCreateChannel(channel mailboxCreateChannel) mailboxCreateChannel {
+	switch channel {
+	case mailboxCreateChannelAppleAccount, mailboxCreateChannelICloudWeb:
+		return channel
+	default:
+		return mailboxCreateChannelAuto
+	}
+}
+
+func mailboxCreateChannelLabel(channel mailboxCreateChannel) string {
+	switch normalizeMailboxCreateChannel(channel) {
+	case mailboxCreateChannelAppleAccount:
+		return "新接口"
+	case mailboxCreateChannelICloudWeb:
+		return "旧接口"
+	default:
+		return "自动接口"
+	}
 }
 
 type syncICloudMailboxResult struct {
@@ -1964,7 +2013,7 @@ func (s *Server) createICloudMailboxForOwner(ctx context.Context, ownerID, accou
 		return Mailbox{}, ICloudRemoteMailbox{}, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先保存登录态", true)
 	}
 	accountID = firstNonEmpty(strings.TrimSpace(accountID), session.AccountID)
-	remote, err := s.createICloudMailboxRemote(ctx, ownerID, session, label, note)
+	remote, err := s.createICloudMailboxRemoteWithChannel(ctx, ownerID, session, label, note, mailboxCreateChannelFromContext(ctx))
 	if err != nil {
 		return Mailbox{}, ICloudRemoteMailbox{}, err
 	}
@@ -1987,6 +2036,15 @@ func (s *Server) createICloudMailboxForOwner(ctx context.Context, ownerID, accou
 
 func (s *Server) createMailboxesForOwner(ctx context.Context, ownerID string, accountIDs []string, label, note string) ([]Mailbox, []ICloudRemoteMailbox, []createMailboxFailure, error) {
 	accountIDs = normalizeAccountIDSelection("", accountIDs)
+	requests := make([]mailboxCreateRequest, 0, len(accountIDs))
+	for _, accountID := range accountIDs {
+		requests = append(requests, mailboxCreateRequest{AccountID: accountID})
+	}
+	return s.createMailboxesForOwnerWithChannels(ctx, ownerID, requests, label, note)
+}
+
+func (s *Server) createMailboxesForOwnerWithChannels(ctx context.Context, ownerID string, requests []mailboxCreateRequest, label, note string) ([]Mailbox, []ICloudRemoteMailbox, []createMailboxFailure, error) {
+	accountIDs, channels := normalizeMailboxCreateRequests(requests)
 	sessions := s.sessionsForOwnerAccounts(ownerID, accountIDs)
 	if len(sessions) == 0 {
 		return nil, nil, nil, errCode("icloud_session_missing", "未找到可用于创建的 iCloud 登录态，请检查参与账号 ID 或先保存登录态", true)
@@ -2001,6 +2059,7 @@ func (s *Server) createMailboxesForOwner(ctx context.Context, ownerID string, ac
 		remote    ICloudRemoteMailbox
 		err       error
 		accountID string
+		channel   mailboxCreateChannel
 	}
 	results := make([]createResult, len(sessions))
 	var wg sync.WaitGroup
@@ -2010,13 +2069,16 @@ func (s *Server) createMailboxesForOwner(ctx context.Context, ownerID string, ac
 		go func() {
 			defer wg.Done()
 			effectiveAccountID := session.AccountID
-			mailbox, remote, err := s.createMailboxForOwner(ctx, ownerID, effectiveAccountID, label, note)
+			channel := channels[strings.TrimSpace(effectiveAccountID)]
+			createCtx := contextWithMailboxCreateChannel(ctx, channel)
+			mailbox, remote, err := s.createMailboxForOwner(createCtx, ownerID, effectiveAccountID, label, note)
 			results[index] = createResult{
 				session:   session,
 				mailbox:   mailbox,
 				remote:    remote,
 				err:       err,
 				accountID: effectiveAccountID,
+				channel:   channel,
 			}
 		}()
 	}
@@ -2029,6 +2091,7 @@ func (s *Server) createMailboxesForOwner(ctx context.Context, ownerID string, ac
 			failures = append(failures, createMailboxFailure{
 				AccountID: result.accountID,
 				AppleID:   maskAppleID(result.session.AppleID),
+				Channel:   string(result.channel),
 				Error:     result.err.Error(),
 			})
 			continue
@@ -2043,6 +2106,10 @@ func (s *Server) createMailboxesForOwner(ctx context.Context, ownerID string, ac
 }
 
 func (s *Server) createICloudMailboxRemote(ctx context.Context, ownerID string, session ICloudSession, label, note string) (ICloudRemoteMailbox, error) {
+	return s.createICloudMailboxRemoteWithChannel(ctx, ownerID, session, label, note, mailboxCreateChannelAuto)
+}
+
+func (s *Server) createICloudMailboxRemoteWithChannel(ctx context.Context, ownerID string, session ICloudSession, label, note string, channel mailboxCreateChannel) (ICloudRemoteMailbox, error) {
 	key := strings.TrimSpace(ownerID)
 	if key == "" {
 		key = "global"
@@ -2058,13 +2125,16 @@ func (s *Server) createICloudMailboxRemote(ctx context.Context, ownerID string, 
 		return ICloudRemoteMailbox{}, err
 	}
 
+	switch normalizeMailboxCreateChannel(channel) {
+	case mailboxCreateChannelAppleAccount:
+		return s.createICloudMailboxRemoteAppleAccount(ctx, ownerID, session, label, note, key)
+	case mailboxCreateChannelICloudWeb:
+		return s.createICloudMailboxRemoteICloudWeb(ctx, session, label, note, key)
+	}
+
 	if _, ok := appleAccountLoginState(session); ok {
-		remote, updatedSession, err := NewICloudClient().CreatePrivacyMailboxWithAppleAccount(ctx, session, s.cfg.AppleAccountAPIKey, label, note)
-		s.markMailboxCreateFinished(key)
+		remote, err := s.createICloudMailboxRemoteAppleAccount(ctx, ownerID, session, label, note, key)
 		if err == nil {
-			if saveErr := s.store.SaveICloudSessionForOwner(ownerID, updatedSession); saveErr != nil {
-				s.logger.Warn("failed to save updated Apple Account login state", "account_id", session.AccountID, "err", saveErr)
-			}
 			return remote, nil
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -2072,7 +2142,27 @@ func (s *Server) createICloudMailboxRemote(ctx context.Context, ownerID string, 
 		}
 		s.logger.Warn("Apple Account mailbox create failed; falling back to iCloud HME", "account_id", session.AccountID, "err", err)
 	}
+	return s.createICloudMailboxRemoteICloudWeb(ctx, session, label, note, key)
+}
 
+func (s *Server) createICloudMailboxRemoteAppleAccount(ctx context.Context, ownerID string, session ICloudSession, label, note, key string) (ICloudRemoteMailbox, error) {
+	if _, ok := appleAccountLoginState(session); !ok {
+		return ICloudRemoteMailbox{}, errCode("apple_account_session_missing", "未保存新接口登录态，请先完成新接口登录", true)
+	}
+	remote, updatedSession, err := NewICloudClient().CreatePrivacyMailboxWithAppleAccount(ctx, session, s.cfg.AppleAccountAPIKey, label, note)
+	s.markMailboxCreateFinished(key)
+	if err == nil {
+		if saveErr := s.store.SaveICloudSessionForOwner(ownerID, updatedSession); saveErr != nil {
+			s.logger.Warn("failed to save updated Apple Account login state", "account_id", session.AccountID, "err", saveErr)
+		}
+	}
+	return remote, err
+}
+
+func (s *Server) createICloudMailboxRemoteICloudWeb(ctx context.Context, session ICloudSession, label, note, key string) (ICloudRemoteMailbox, error) {
+	if !iCloudWebLoginSaved(session) {
+		return ICloudRemoteMailbox{}, errCode("icloud_session_missing", "未保存旧接口登录态，请先完成旧接口登录", true)
+	}
 	if cooldownRemaining := s.mailboxCreateCooldownRemaining(key); cooldownRemaining > 0 {
 		remaining := int(cooldownRemaining.Round(time.Second).Seconds())
 		if remaining < 1 {
@@ -2088,6 +2178,24 @@ func (s *Server) createICloudMailboxRemote(ctx context.Context, ownerID string, 
 		s.markMailboxCreateCooldown(key, mailboxCreateLimitCooldown)
 	}
 	return remote, err
+}
+
+func normalizeMailboxCreateRequests(requests []mailboxCreateRequest) ([]string, map[string]mailboxCreateChannel) {
+	accountIDs := make([]string, 0, len(requests))
+	channels := make(map[string]mailboxCreateChannel, len(requests))
+	for _, request := range requests {
+		for _, accountID := range splitAccountIDTokens(request.AccountID) {
+			if accountID == "" {
+				continue
+			}
+			if _, ok := channels[accountID]; ok {
+				continue
+			}
+			channels[accountID] = normalizeMailboxCreateChannel(request.Channel)
+			accountIDs = append(accountIDs, accountID)
+		}
+	}
+	return accountIDs, channels
 }
 
 func (s *Server) acquireMailboxCreateGate(ctx context.Context, key string) (func(), error) {
