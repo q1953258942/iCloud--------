@@ -36,6 +36,7 @@ type Server struct {
 	logger                *slog.Logger
 	mux                   *http.ServeMux
 	icloudProtocolLogins  *appleAuthPendingStore
+	appleAccountLogins    *appleAuthPendingStore
 	icloudCreateMu        sync.Mutex
 	icloudCreateLast      map[string]time.Time
 	icloudCreateCooldown  map[string]time.Time
@@ -96,6 +97,7 @@ func NewServer(cfg Config, store *FileStore, logger *slog.Logger) http.Handler {
 		logger:               logger,
 		mux:                  http.NewServeMux(),
 		icloudProtocolLogins: newAppleAuthPendingStore(),
+		appleAccountLogins:   newAppleAuthPendingStore(),
 		icloudCreateLast:     make(map[string]time.Time),
 		icloudCreateCooldown: make(map[string]time.Time),
 		icloudMailSyncGates:  make(map[string]chan struct{}),
@@ -144,6 +146,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/icloud/session", s.handleICloudSession)
 	s.mux.HandleFunc("POST /api/icloud/protocol-login/start", s.handleStartICloudProtocolLogin)
 	s.mux.HandleFunc("POST /api/icloud/protocol-login/2fa", s.handleSubmitICloudProtocol2FA)
+	s.mux.HandleFunc("POST /api/apple-account/login/start", s.handleStartAppleAccountLogin)
+	s.mux.HandleFunc("POST /api/apple-account/login/2fa", s.handleSubmitAppleAccount2FA)
 	s.mux.HandleFunc("POST /api/icloud/session/check", s.handleCheckICloudSession)
 	s.mux.HandleFunc("POST /api/icloud/mailboxes/create", s.handleCreateICloudMailbox)
 	s.mux.HandleFunc("POST /api/icloud/mailboxes/sync", s.handleSyncICloudMailboxes)
@@ -831,6 +835,84 @@ func (s *Server) handleSubmitICloudProtocol2FA(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":  true,
 		"message":  "Apple 协议 2FA 登录成功，登录态已保存",
+		"session":  publicSessionForAppleID(sessions, session.AppleID),
+		"sessions": sessions,
+	})
+}
+
+func (s *Server) handleStartAppleAccountLogin(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		AppleID  string `json:"apple_id"`
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	result, err := NewAppleAuthClient().StartAppleAccountManageLogin(
+		r.Context(),
+		payload.AppleID,
+		payload.Password,
+		s.appleAccountLogins,
+	)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	if result.Needs2FA {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success":    true,
+			"needs_2fa":  true,
+			"pending_id": result.PendingID,
+			"apple_id":   result.AppleID,
+			"expires_at": formatTime(result.ExpiresAt),
+			"message":    result.Message,
+		})
+		return
+	}
+	if err := s.store.SaveICloudSessionForOwner(requestOwnerID(r, s.store), result.Session); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	sessions := s.publicSessionsForRequest(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":   true,
+		"needs_2fa": false,
+		"message":   result.Message,
+		"session":   publicSessionForAppleID(sessions, result.Session.AppleID),
+		"sessions":  sessions,
+	})
+}
+
+func (s *Server) handleSubmitAppleAccount2FA(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		PendingID   string          `json:"pending_id"`
+		Code        string          `json:"code"`
+		PhoneNumber json.RawMessage `json:"phone_number,omitempty"`
+	}
+	if err := decodeJSON(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	pending, ok := s.appleAccountLogins.get(payload.PendingID)
+	if !ok {
+		writeError(w, http.StatusBadRequest, errCode("apple_login_pending_expired", "Apple Account 管理态登录已过期，请重新输入账号密码发起登录", true))
+		return
+	}
+	session, err := NewAppleAuthClient().SubmitAppleAccountManage2FA(r.Context(), pending, payload.Code, payload.PhoneNumber)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	s.appleAccountLogins.delete(payload.PendingID)
+	if err := s.store.SaveICloudSessionForOwner(requestOwnerID(r, s.store), session); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	sessions := s.publicSessionsForRequest(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":  true,
+		"message":  "Apple Account 管理态 2FA 登录成功，登录态已保存",
 		"session":  publicSessionForAppleID(sessions, session.AppleID),
 		"sessions": sessions,
 	})
@@ -1943,16 +2025,6 @@ func (s *Server) createICloudMailboxRemote(ctx context.Context, ownerID string, 
 	defer s.icloudCreateMu.Unlock()
 
 	now := time.Now()
-	if cooldownUntil := s.icloudCreateCooldown[key]; cooldownUntil.After(now) {
-		remaining := int(cooldownUntil.Sub(now).Round(time.Second).Seconds())
-		if remaining < 1 {
-			remaining = 1
-		}
-		return ICloudRemoteMailbox{}, errCode("icloud_hme_limit", fmt.Sprintf("iCloud 创建上限冷却中，请约 %d 秒后再试", remaining), true)
-	} else if !cooldownUntil.IsZero() {
-		delete(s.icloudCreateCooldown, key)
-	}
-
 	if last := s.icloudCreateLast[key]; !last.IsZero() {
 		if wait := last.Add(mailboxCreateMinInterval).Sub(now); wait > 0 {
 			timer := time.NewTimer(wait)
@@ -1963,6 +2035,32 @@ func (s *Server) createICloudMailboxRemote(ctx context.Context, ownerID string, 
 			case <-timer.C:
 			}
 		}
+	}
+
+	if _, ok := appleAccountLoginState(session); ok {
+		remote, updatedSession, err := NewICloudClient().CreatePrivacyMailboxWithAppleAccount(ctx, session, s.cfg.AppleAccountAPIKey, label, note)
+		s.icloudCreateLast[key] = time.Now()
+		if err == nil {
+			if saveErr := s.store.SaveICloudSessionForOwner(ownerID, updatedSession); saveErr != nil {
+				s.logger.Warn("failed to save updated Apple Account login state", "account_id", session.AccountID, "err", saveErr)
+			}
+			return remote, nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ICloudRemoteMailbox{}, err
+		}
+		s.logger.Warn("Apple Account mailbox create failed; falling back to iCloud HME", "account_id", session.AccountID, "err", err)
+	}
+
+	now = time.Now()
+	if cooldownUntil := s.icloudCreateCooldown[key]; cooldownUntil.After(now) {
+		remaining := int(cooldownUntil.Sub(now).Round(time.Second).Seconds())
+		if remaining < 1 {
+			remaining = 1
+		}
+		return ICloudRemoteMailbox{}, errCode("icloud_hme_limit", fmt.Sprintf("iCloud 创建上限冷却中，请约 %d 秒后再试", remaining), true)
+	} else if !cooldownUntil.IsZero() {
+		delete(s.icloudCreateCooldown, key)
 	}
 
 	remote, err := NewICloudClient().CreatePrivacyMailbox(ctx, session, label, note)
@@ -2207,6 +2305,8 @@ func (s *Server) allowsUserSession(r *http.Request) bool {
 		switch r.URL.Path {
 		case "/api/icloud/protocol-login/start",
 			"/api/icloud/protocol-login/2fa",
+			"/api/apple-account/login/start",
+			"/api/apple-account/login/2fa",
 			"/api/icloud/session/check",
 			"/api/icloud/mailboxes/create",
 			"/api/icloud/mailboxes/sync",
@@ -2536,25 +2636,26 @@ func publicSession(session *ICloudSession) publicICloudSession {
 		message = "登录态已保存；Cookie 原文只写入本地 data/state.json，不会返回前端"
 	}
 	return publicICloudSession{
-		Saved:              true,
-		AccountID:          session.AccountID,
-		SavedAt:            formatTime(session.SavedAt),
-		AppleID:            maskAppleID(session.AppleID),
-		DSIDMask:           maskSecret(session.DSID, 4),
-		ClientBuildNumber:  session.ClientBuildNumber,
-		MasteringNumber:    session.MasteringNumber,
-		PremiumMailBaseURL: session.PremiumMailBaseURL,
-		MailGatewayBaseURL: session.MailGatewayBaseURL,
-		MailBaseURL:        session.MailBaseURL,
-		Host:               session.Host,
-		IsICloudPlus:       session.IsICloudPlus,
-		CanCreateHME:       session.CanCreateHME,
-		CookieCount:        len(session.Cookies),
-		ProviderConfigured: session.IsICloudPlus && session.CanCreateHME && len(session.Cookies) > 0,
-		NeedsManualLogin:   len(session.Cookies) == 0,
-		LastCheckedAt:      formatTime(session.LastCheckedAt),
-		LastCheckOK:        session.LastCheckOK,
-		LastStatusMessage:  message,
+		Saved:                   true,
+		AccountID:               session.AccountID,
+		SavedAt:                 formatTime(session.SavedAt),
+		AppleID:                 maskAppleID(session.AppleID),
+		DSIDMask:                maskSecret(session.DSID, 4),
+		ClientBuildNumber:       session.ClientBuildNumber,
+		MasteringNumber:         session.MasteringNumber,
+		PremiumMailBaseURL:      session.PremiumMailBaseURL,
+		MailGatewayBaseURL:      session.MailGatewayBaseURL,
+		MailBaseURL:             session.MailBaseURL,
+		Host:                    session.Host,
+		IsICloudPlus:            session.IsICloudPlus,
+		CanCreateHME:            session.CanCreateHME,
+		CookieCount:             len(session.Cookies),
+		AppleAccountManageReady: appleAccountManageReady(*session),
+		ProviderConfigured:      session.IsICloudPlus && session.CanCreateHME && len(session.Cookies) > 0,
+		NeedsManualLogin:        len(session.Cookies) == 0,
+		LastCheckedAt:           formatTime(session.LastCheckedAt),
+		LastCheckOK:             session.LastCheckOK,
+		LastStatusMessage:       message,
 	}
 }
 

@@ -474,6 +474,8 @@
           <div class="toolbar">
             <button class="primary" onclick="startProtocolLogin()">协议登录</button>
             <button id="protocol2FAButton" onclick="submitProtocol2FA()">提交 2FA</button>
+            <button onclick="startAppleAccountLogin()">管理态登录</button>
+            <button id="appleAccount2FAButton" onclick="submitAppleAccount2FA()">提交管理态 2FA</button>
             <button id="sessionCheckButton" onclick="checkICloudSession()">检测登录态</button>
           </div>
           <div class="field-grid">
@@ -486,7 +488,7 @@
         <section class="view-section panel" data-view="create">
           <div class="panel-head">
             <h2>协议创建邮箱</h2>
-            <p>从已保存的 iCloud+ 账号生成 Hide My Email 地址。</p>
+            <p>优先用 Apple Account 新接口创建，达到上限后回落 iCloud 旧接口。</p>
           </div>
           <div class="field-grid">
             <label>标签<input id="protoLabel" placeholder="UPI-70-13"></label>
@@ -632,6 +634,7 @@
     let activeMailboxAccountKey = 'all';
     let activeICloudSessionKey = '';
     let protocolPendingID = '';
+    let appleAccountPendingID = '';
     let sessionCheckTimer = null;
     let sessionCheckInFlight = false;
     let schedulerPollTimer = null;
@@ -803,7 +806,7 @@
         const checked = selectedCreateAccountIDs.has(id) ? 'checked' : '';
         const title = createAccountDisplayName(session);
         const status = [
-          session.can_create_hme ? '可创建' : '不可创建',
+          session.apple_account_manage_ready ? '新接口可创建' : (session.can_create_hme ? '旧接口可创建' : '不可创建'),
           session.last_check_ok ? '检测正常' : (session.last_checked_at ? '检测失败' : '未检测')
         ].join(' / ');
         return `<label class="create-account-option">
@@ -1396,6 +1399,7 @@
       const flags = [
         active.is_icloud_plus ? 'iCloud+ active' : '无 iCloud+',
         active.can_create_hme ? '可创建隐私邮箱' : '不可创建隐私邮箱',
+        active.apple_account_manage_ready ? 'Apple Account 管理态可用' : '未保存管理态',
         `Cookie ${active.cookie_count || 0}`
       ].join(' / ');
       const checkLine = active.last_checked_at
@@ -1517,6 +1521,61 @@
       } catch (err) {
         log('协议 2FA 提交失败：' + err.message);
         $('icloudSessionInfo').textContent = '协议 2FA 提交失败：' + err.message;
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function startAppleAccountLogin() {
+      const appleId = $('protocolAppleId').value.trim();
+      const data = await api('/api/apple-account/login/start', {method:'POST', body: JSON.stringify({
+        apple_id: appleId,
+        password: $('protocolPassword').value
+      })});
+      $('protocolPassword').value = '';
+      if (data.needs_2fa) {
+        appleAccountPendingID = data.pending_id || '';
+        log(`${data.message || '管理态需要 2FA'}：${data.apple_id || appleId}，有效期 ${data.expires_at || '-'}`);
+        $('icloudSessionInfo').textContent = `${data.message || '管理态需要 2FA'}\n账号：${data.apple_id || appleId}\n有效期：${data.expires_at || '-'}`;
+        return;
+      }
+      renderICloudSession(data.session);
+      if (data.sessions) renderICloudSessions(data.sessions);
+      log('Apple Account 管理态登录成功：' + (data.session.apple_id || appleId));
+      await refresh();
+    }
+
+    async function submitAppleAccount2FA() {
+      if (!appleAccountPendingID) {
+        log('没有待验证的 Apple Account 管理态登录，请先点击“管理态登录”');
+        $('icloudSessionInfo').textContent = '没有待验证的 Apple Account 管理态登录，请先点击“管理态登录”。';
+        return;
+      }
+      const code = $('protocol2FA').value.trim();
+      if (!/^\d{6}$/.test(code)) {
+        log('管理态 2FA 提交失败：请输入 6 位验证码');
+        $('icloudSessionInfo').textContent = '管理态 2FA 提交失败：请输入 6 位验证码。';
+        return;
+      }
+      const button = $('appleAccount2FAButton');
+      const pendingID = appleAccountPendingID;
+      button.disabled = true;
+      $('icloudSessionInfo').textContent = '已提交 Apple Account 管理态 2FA，正在验证并保存登录态...';
+      log('已提交 Apple Account 管理态 2FA，正在验证并保存登录态');
+      try {
+        const data = await api('/api/apple-account/login/2fa', {method:'POST', body: JSON.stringify({
+          pending_id: pendingID,
+          code
+        })});
+        appleAccountPendingID = '';
+        $('protocol2FA').value = '';
+        renderICloudSession(data.session);
+        if (data.sessions) renderICloudSessions(data.sessions);
+        log((data.message || 'Apple Account 管理态 2FA 登录成功，登录态已保存') + '：' + (data.session.apple_id || '-'));
+        await refresh();
+      } catch (err) {
+        log('Apple Account 管理态 2FA 提交失败：' + err.message);
+        $('icloudSessionInfo').textContent = 'Apple Account 管理态 2FA 提交失败：' + err.message;
       } finally {
         button.disabled = false;
       }

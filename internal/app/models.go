@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -30,6 +31,11 @@ type State struct {
 	ICloudSession  *ICloudSession  `json:"icloud_session,omitempty"`
 	ICloudSessions []ICloudSession `json:"icloud_sessions,omitempty"`
 }
+
+const (
+	LoginStateICloudWeb    = "icloud_web"
+	LoginStateAppleAccount = "apple_account"
+)
 
 type User struct {
 	ID           string    `json:"id"`
@@ -112,10 +118,25 @@ type ICloudSession struct {
 	IsICloudPlus       bool            `json:"is_icloud_plus"`
 	CanCreateHME       bool            `json:"can_create_hme"`
 	Cookies            []SessionCookie `json:"cookies"`
+	LoginStates        []LoginState    `json:"login_states,omitempty"`
 	Note               string          `json:"note,omitempty"`
 	LastCheckedAt      time.Time       `json:"last_checked_at,omitempty"`
 	LastCheckOK        bool            `json:"last_check_ok,omitempty"`
 	LastStatusMessage  string          `json:"last_status_message,omitempty"`
+}
+
+type LoginState struct {
+	Kind            string          `json:"kind"`
+	Host            string          `json:"host,omitempty"`
+	Origin          string          `json:"origin,omitempty"`
+	SavedAt         time.Time       `json:"saved_at,omitempty"`
+	Cookies         []SessionCookie `json:"cookies,omitempty"`
+	Scnt            string          `json:"scnt,omitempty"`
+	SessionID       string          `json:"session_id,omitempty"`
+	APIKey          string          `json:"api_key,omitempty"`
+	DataAccessToken string          `json:"data_access_token,omitempty"`
+	UserAgent       string          `json:"user_agent,omitempty"`
+	Note            string          `json:"note,omitempty"`
 }
 
 func (a *Account) UnmarshalJSON(data []byte) error {
@@ -167,7 +188,9 @@ func (s *ICloudSession) UnmarshalJSON(data []byte) error {
 	type alias ICloudSession
 	aux := struct {
 		*alias
-		LegacyOwnerID string `json:"browser_key,omitempty"`
+		LegacyOwnerID               string `json:"browser_key,omitempty"`
+		LegacyAppleAccountScnt      string `json:"apple_account_scnt,omitempty"`
+		LegacyAppleAccountSessionID string `json:"apple_account_session_id,omitempty"`
 	}{alias: (*alias)(s)}
 	if err := json.Unmarshal(data, &aux); err != nil {
 		return err
@@ -175,7 +198,38 @@ func (s *ICloudSession) UnmarshalJSON(data []byte) error {
 	if s.OwnerID == "" {
 		s.OwnerID = aux.LegacyOwnerID
 	}
+	if len(s.Cookies) > 0 && !hasLoginStateKind(s.LoginStates, LoginStateICloudWeb) {
+		s.LoginStates = append(s.LoginStates, LoginState{
+			Kind:    LoginStateICloudWeb,
+			Host:    s.Host,
+			Origin:  iCloudOrigin(*s),
+			SavedAt: s.SavedAt,
+			Cookies: append([]SessionCookie(nil), s.Cookies...),
+			Note:    "iCloud web login state migrated from legacy session",
+		})
+	}
+	if strings.TrimSpace(aux.LegacyAppleAccountScnt) != "" && !hasLoginStateKind(s.LoginStates, LoginStateAppleAccount) {
+		s.LoginStates = append(s.LoginStates, LoginState{
+			Kind:      LoginStateAppleAccount,
+			Host:      appleAccountManageHostForICloudHost(s.Host),
+			Origin:    appleAccountManageOriginForHost(s.Host),
+			SavedAt:   s.SavedAt,
+			Scnt:      aux.LegacyAppleAccountScnt,
+			SessionID: aux.LegacyAppleAccountSessionID,
+			UserAgent: appleAccountManageUserAgent,
+			Note:      "Apple Account login state migrated from legacy session",
+		})
+	}
 	return nil
+}
+
+func hasLoginStateKind(states []LoginState, kind string) bool {
+	for _, state := range states {
+		if state.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 type SessionCookie struct {
@@ -261,25 +315,26 @@ type publicUserSummary struct {
 }
 
 type publicICloudSession struct {
-	Saved              bool   `json:"saved"`
-	AccountID          string `json:"account_id,omitempty"`
-	SavedAt            string `json:"saved_at,omitempty"`
-	AppleID            string `json:"apple_id,omitempty"`
-	DSIDMask           string `json:"dsid_mask,omitempty"`
-	ClientBuildNumber  string `json:"client_build_number,omitempty"`
-	MasteringNumber    string `json:"client_mastering_number,omitempty"`
-	PremiumMailBaseURL string `json:"premium_mail_base_url,omitempty"`
-	MailGatewayBaseURL string `json:"mail_gateway_base_url,omitempty"`
-	MailBaseURL        string `json:"mail_base_url,omitempty"`
-	Host               string `json:"host,omitempty"`
-	IsICloudPlus       bool   `json:"is_icloud_plus"`
-	CanCreateHME       bool   `json:"can_create_hme"`
-	CookieCount        int    `json:"cookie_count"`
-	ProviderConfigured bool   `json:"provider_configured"`
-	NeedsManualLogin   bool   `json:"needs_manual_login"`
-	LastCheckedAt      string `json:"last_checked_at,omitempty"`
-	LastCheckOK        bool   `json:"last_check_ok"`
-	LastStatusMessage  string `json:"last_status_message,omitempty"`
+	Saved                   bool   `json:"saved"`
+	AccountID               string `json:"account_id,omitempty"`
+	SavedAt                 string `json:"saved_at,omitempty"`
+	AppleID                 string `json:"apple_id,omitempty"`
+	DSIDMask                string `json:"dsid_mask,omitempty"`
+	ClientBuildNumber       string `json:"client_build_number,omitempty"`
+	MasteringNumber         string `json:"client_mastering_number,omitempty"`
+	PremiumMailBaseURL      string `json:"premium_mail_base_url,omitempty"`
+	MailGatewayBaseURL      string `json:"mail_gateway_base_url,omitempty"`
+	MailBaseURL             string `json:"mail_base_url,omitempty"`
+	Host                    string `json:"host,omitempty"`
+	IsICloudPlus            bool   `json:"is_icloud_plus"`
+	CanCreateHME            bool   `json:"can_create_hme"`
+	CookieCount             int    `json:"cookie_count"`
+	AppleAccountManageReady bool   `json:"apple_account_manage_ready"`
+	ProviderConfigured      bool   `json:"provider_configured"`
+	NeedsManualLogin        bool   `json:"needs_manual_login"`
+	LastCheckedAt           string `json:"last_checked_at,omitempty"`
+	LastCheckOK             bool   `json:"last_check_ok"`
+	LastStatusMessage       string `json:"last_status_message,omitempty"`
 }
 
 type apiError struct {

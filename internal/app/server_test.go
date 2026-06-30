@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,6 +42,42 @@ func TestExtractOTP(t *testing.T) {
 				t.Fatalf("extractOTP() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGenerateAppleHashcash(t *testing.T) {
+	challenge := "0123456789abcdef0123456789abcdef"
+	now := time.Date(2026, 6, 29, 14, 2, 22, 0, time.UTC)
+	got, err := generateAppleHashcash(8, challenge, now)
+	if err != nil {
+		t.Fatalf("generateAppleHashcash() error = %v", err)
+	}
+	parts := strings.Split(got, ":")
+	if len(parts) != 6 {
+		t.Fatalf("hashcash parts = %d, want 6 in %q", len(parts), got)
+	}
+	if parts[0] != "1" || parts[1] != "8" || parts[2] != "20260629140222" || parts[3] != challenge || parts[4] != "" || parts[5] == "" {
+		t.Fatalf("hashcash format mismatch: %q", got)
+	}
+	sum := sha1.Sum([]byte(got))
+	if leadingZeroBits(sum[:]) < 8 {
+		t.Fatalf("hashcash does not satisfy requested difficulty")
+	}
+}
+
+func TestAppleAccountFDClientInfoUsesBrowserFingerprint(t *testing.T) {
+	var info map[string]string
+	if err := json.Unmarshal([]byte(appleAccountFDClientInfo(appleAccountManageUserAgent)), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info["U"] != appleAccountManageUserAgent {
+		t.Fatalf("U = %q, want manage user agent", info["U"])
+	}
+	if info["L"] != appleAccountManageLanguage || info["Z"] != appleAccountManageGMTOffset || info["V"] != "1.1" {
+		t.Fatalf("unexpected locale fields: %+v", info)
+	}
+	if len(info["F"]) < 80 {
+		t.Fatalf("F length = %d, want browser fingerprint", len(info["F"]))
 	}
 }
 
@@ -166,6 +203,16 @@ func TestCookieHeaderFiltersByDomainAndExpiry(t *testing.T) {
 	got := cookieHeader(cookies, "https://p213-maildomainws.icloud.com.cn/v1/hme/generate")
 	if got != "ok=1" {
 		t.Fatalf("cookieHeader() = %q, want ok=1", got)
+	}
+}
+
+func TestAppleDebugBodyRedactsSecrets(t *testing.T) {
+	got := appleDebugBody([]byte(`{"apiKey":"secret-api","emailAddress":"alias@example.com","nested":{"sessionToken":"secret-token","forwardToEmail":"main@example.com"},"ok":true}`))
+	if strings.Contains(got, "secret-api") || strings.Contains(got, "secret-token") || strings.Contains(got, "alias@example.com") || strings.Contains(got, "main@example.com") {
+		t.Fatalf("debug body leaked secret: %s", got)
+	}
+	if !strings.Contains(got, "<redacted>") || !strings.Contains(got, `"ok":true`) {
+		t.Fatalf("debug body = %s, want redacted secret and visible safe fields", got)
 	}
 }
 
@@ -338,6 +385,567 @@ func TestICloudCreateLimitErrorIsClassified(t *testing.T) {
 	}
 	if coded.code != "icloud_hme_limit" || !coded.retryable {
 		t.Fatalf("coded error = %+v, want icloud_hme_limit retryable", coded)
+	}
+}
+
+func TestICloudClientCreatePrivacyMailboxWithAppleAccount(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+
+	var paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		if r.Header.Get("X-Apple-Api-Key") != "account-key" {
+			t.Fatalf("api key header = %q, want account-key", r.Header.Get("X-Apple-Api-Key"))
+		}
+		if r.Header.Get("X-Apple-I-Request-Context") != "ca" {
+			t.Fatalf("request context = %q, want ca", r.Header.Get("X-Apple-I-Request-Context"))
+		}
+		if r.Header.Get("Origin") != "https://account.apple.com" {
+			t.Fatalf("origin = %q, want account.apple.com", r.Header.Get("Origin"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /account/manage/email/private/add":
+			if r.Header.Get("scnt") != "scnt-token" {
+				t.Fatalf("add scnt header = %q, want scnt-token", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-add")
+			body, _ := io.ReadAll(r.Body)
+			if strings.TrimSpace(string(body)) != "{}" {
+				t.Fatalf("add body = %s, want {}", body)
+			}
+			_, _ = w.Write([]byte(`{"emailAddress":"Candidate.Alias@icloud.com","newToPrivateEmail":false,"exists":false,"type":"settings","active":false}`))
+		case "PUT /account/manage/email/private/add/complete":
+			if r.Header.Get("scnt") != "scnt-after-add" {
+				t.Fatalf("complete scnt header = %q, want scnt-after-add", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-complete")
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["emailAddress"] != "Candidate.Alias@icloud.com" || body["label"] != "LAB" || body["note"] != "note" {
+				t.Fatalf("complete body = %+v", body)
+			}
+			_, _ = w.Write([]byte(`{"emailAddress":"Candidate.Alias@icloud.com","label":"LAB","note":"note","id":"abc123","type":"settings","active":false}`))
+		case "GET /account/manage/email/private/abc123.em":
+			if r.Header.Get("scnt") != "scnt-after-complete" {
+				t.Fatalf("confirm scnt header = %q, want scnt-after-complete", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-confirm")
+			_, _ = w.Write([]byte(`{"emailAddress":"Candidate.Alias@icloud.com","label":"LAB","note":"note","id":"abc123","forwardToEmail":"main@example.com","active":true}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+	appleAccountManageBaseURL = ts.URL
+
+	client := &ICloudClient{client: ts.Client()}
+	remote, updatedSession, err := client.CreatePrivacyMailboxWithAppleAccount(t.Context(), ICloudSession{
+		LoginStates: []LoginState{{
+			Kind:   LoginStateAppleAccount,
+			Scnt:   "scnt-token",
+			APIKey: "account-key",
+		}},
+	}, "", "LAB", "note")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remote.Email != "candidate.alias@icloud.com" || remote.Label != "LAB" || remote.AnonymousID != "abc123" || !remote.IsActive || remote.ForwardToEmail != "main@example.com" || remote.Origin != "APPLE_ACCOUNT" {
+		t.Fatalf("remote = %+v", remote)
+	}
+	wantPaths := []string{
+		"POST /account/manage/email/private/add",
+		"PUT /account/manage/email/private/add/complete",
+		"GET /account/manage/email/private/abc123.em",
+	}
+	if strings.Join(paths, "\n") != strings.Join(wantPaths, "\n") {
+		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
+	}
+	updatedState, ok := appleAccountLoginState(updatedSession)
+	if !ok || updatedState.Scnt != "scnt-after-confirm" {
+		t.Fatalf("updated apple account state = %+v ok=%v, want scnt-after-confirm", updatedState, ok)
+	}
+}
+
+func TestICloudClientCreatePrivacyMailboxWithAppleAccountRequiresManageSession(t *testing.T) {
+	client := NewICloudClient()
+	_, _, err := client.CreatePrivacyMailboxWithAppleAccount(t.Context(), ICloudSession{}, "account-key", "LAB", "")
+	coded, ok := err.(codedError)
+	if !ok {
+		t.Fatalf("error type = %T, want codedError", err)
+	}
+	if coded.code != "apple_account_session_missing" {
+		t.Fatalf("code = %q, want apple_account_session_missing", coded.code)
+	}
+}
+
+func TestAppleAuthClientPrimeAppleAccountManageStateKeepsChallengeScnt(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+
+	var paths []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /account/manage/section/privacy":
+			w.Header().Set("scnt", "page-scnt")
+			_, _ = w.Write([]byte(`<html></html>`))
+		case "GET /bootstrap/portal":
+			_, _ = w.Write([]byte(`{"timeOutInterval":15}`))
+		case "GET /account/manage/gs/ws/token":
+			if r.Header.Get("scnt") != "" {
+				t.Fatalf("pre-login token scnt header = %q, want empty", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "manage-scnt")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+	appleAccountManageBaseURL = ts.URL
+
+	session := &appleAuthSession{
+		Endpoints: appleAccountManageAuthEndpoints(),
+		UserAgent: appleAccountManageUserAgent,
+	}
+	client := &AppleAuthClient{httpClient: ts.Client()}
+	if err := client.primeAppleAccountManageState(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+	if session.ManageScnt != "manage-scnt" {
+		t.Fatalf("ManageScnt = %q, want manage-scnt", session.ManageScnt)
+	}
+	wantPaths := []string{
+		"GET /account/manage/section/privacy",
+		"GET /bootstrap/portal",
+		"GET /account/manage/gs/ws/token",
+	}
+	if strings.Join(paths, "\n") != strings.Join(wantPaths, "\n") {
+		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
+	}
+}
+
+func TestAppleAuthClientAuthStartPreservesAppleAccountCompleteHashcashChallenge(t *testing.T) {
+	var gotPath string
+	var gotAuthVersion string
+	var gotSecFetchDest string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuthVersion = r.URL.Query().Get("authVersion")
+		gotSecFetchDest = r.Header.Get("Sec-Fetch-Dest")
+		if r.Header.Get("Accept") == "" || !strings.Contains(r.Header.Get("Accept"), "text/html") {
+			t.Fatalf("Accept = %q, want browser navigation accept", r.Header.Get("Accept"))
+		}
+		w.Header().Set("X-Apple-HC-Bits", "8")
+		w.Header().Set("X-Apple-HC-Challenge", "initial-challenge")
+		_, _ = w.Write([]byte(`<html></html>`))
+	}))
+	defer ts.Close()
+
+	session := &appleAuthSession{
+		Endpoints: appleAuthEndpoints{
+			Home: "https://account.apple.com",
+			Auth: ts.URL,
+		},
+		ClientID:  appleAccountManageOAuthClientID,
+		FrameID:   "unit",
+		UserAgent: appleAccountManageUserAgent,
+	}
+	client := &AppleAuthClient{httpClient: ts.Client()}
+	if err := client.authStart(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/authorize/signin" {
+		t.Fatalf("path = %q, want /authorize/signin", gotPath)
+	}
+	if gotAuthVersion != "8.0.2" {
+		t.Fatalf("authVersion = %q, want 8.0.2", gotAuthVersion)
+	}
+	if gotSecFetchDest != "iframe" {
+		t.Fatalf("Sec-Fetch-Dest = %q, want iframe", gotSecFetchDest)
+	}
+	if session.CompleteHCBits != 8 || session.CompleteHCChallenge != "initial-challenge" {
+		t.Fatalf("complete hashcash = %d/%q, want 8/initial-challenge", session.CompleteHCBits, session.CompleteHCChallenge)
+	}
+
+	session.HCBits = 12
+	session.HCChallenge = "later-challenge"
+	bits, challenge := session.completeHashcashChallenge()
+	if bits != 8 || challenge != "initial-challenge" {
+		t.Fatalf("completeHashcashChallenge() = %d/%q, want preserved initial challenge", bits, challenge)
+	}
+}
+
+func TestAppleAuthClientAuthSRPUsesPreservedAppleAccountHashcashAndBrowserBody(t *testing.T) {
+	var completeHashcash string
+	var completeBody map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "POST /signin/init":
+			w.Header().Set("X-Apple-HC-Bits", "12")
+			w.Header().Set("X-Apple-HC-Challenge", "later-challenge")
+			_, _ = w.Write([]byte(`{"iteration":1,"salt":"c2FsdA==","protocol":"s2k","b":"Ag==","c":"proof-context"}`))
+		case "POST /signin/complete":
+			completeHashcash = r.Header.Get("X-Apple-HC")
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(data, &completeBody); err != nil {
+				t.Fatal(err)
+			}
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+
+	session := &appleAuthSession{
+		Endpoints: appleAuthEndpoints{
+			Home: "https://account.apple.com",
+			Auth: ts.URL,
+		},
+		AppleID:        "user@example.com",
+		ClientID:       appleAccountManageOAuthClientID,
+		HCBits:         8,
+		HCChallenge:    "initial-challenge",
+		UserAgent:      appleAccountManageUserAgent,
+		Scnt:           "scnt",
+		SessionID:      "session-id",
+		AuthAttributes: "attributes",
+	}
+	session.rememberCompleteHashcashChallenge()
+
+	client := &AppleAuthClient{httpClient: ts.Client()}
+	needs2FA, err := client.authSRP(t.Context(), session, "password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !needs2FA {
+		t.Fatalf("needs2FA = false, want true")
+	}
+	if !strings.Contains(completeHashcash, ":8:") || !strings.Contains(completeHashcash, ":initial-challenge::") {
+		t.Fatalf("X-Apple-HC = %q, want preserved initial challenge", completeHashcash)
+	}
+	if completeBody["rememberMe"] != false {
+		t.Fatalf("rememberMe = %#v, want false", completeBody["rememberMe"])
+	}
+	if _, ok := completeBody["trustTokens"]; ok {
+		t.Fatalf("trustTokens present in Apple Account manage complete body: %#v", completeBody["trustTokens"])
+	}
+	if completeBody["accountName"] != "user@example.com" {
+		t.Fatalf("accountName = %#v, want user@example.com", completeBody["accountName"])
+	}
+}
+
+func TestAppleAccountFallbackPhoneNumber(t *testing.T) {
+	if got := string(appleAccountFallbackPhoneNumber(nil)); got != `{"id":1,"nonFTEU":true}` {
+		t.Fatalf("nil fallback = %s", got)
+	}
+	if got := string(appleAccountFallbackPhoneNumber(json.RawMessage(`null`))); got != `{"id":1,"nonFTEU":true}` {
+		t.Fatalf("null fallback = %s", got)
+	}
+	if got := string(appleAccountFallbackPhoneNumber(nil, json.RawMessage(`{"id":3}`))); got != `{"id":3}` {
+		t.Fatalf("stored fallback = %s", got)
+	}
+	if got := string(appleAccountFallbackPhoneNumber(json.RawMessage(`{"id":2}`))); got != `{"id":2}` {
+		t.Fatalf("explicit phone = %s", got)
+	}
+}
+
+func TestAppleAuthClientRequestsBrowser2FACodeEndpoints(t *testing.T) {
+	var paths []string
+	var phoneBody map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "PUT /verify/trusteddevice/securitycode":
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{}`))
+		case "PUT /verify/phone":
+			if err := json.NewDecoder(r.Body).Decode(&phoneBody); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+
+	session := &appleAuthSession{
+		Endpoints: appleAuthEndpoints{
+			Home: "https://account.apple.com",
+			Auth: ts.URL,
+		},
+		ClientID:       appleAccountManageOAuthClientID,
+		FrameID:        "unit",
+		UserAgent:      appleAccountManageUserAgent,
+		Scnt:           "scnt-token",
+		SessionID:      "session-id",
+		TwoFactorPhone: json.RawMessage(`{"id":2,"nonFTEU":true}`),
+	}
+	client := &AppleAuthClient{httpClient: ts.Client()}
+	if err := client.requestTrustedDeviceCode(t.Context(), session); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.requestPhoneSecurityCode(t.Context(), session, nil); err != nil {
+		t.Fatal(err)
+	}
+	wantPaths := []string{
+		"PUT /verify/trusteddevice/securitycode",
+		"PUT /verify/phone",
+	}
+	if strings.Join(paths, "\n") != strings.Join(wantPaths, "\n") {
+		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
+	}
+	phone, ok := phoneBody["phoneNumber"].(map[string]any)
+	if !ok {
+		t.Fatalf("phoneNumber = %#v, want object", phoneBody["phoneNumber"])
+	}
+	if phone["id"] != float64(2) {
+		t.Fatalf("phone id = %#v, want 2", phone["id"])
+	}
+	if _, ok := phone["nonFTEU"]; ok {
+		t.Fatalf("send phoneNumber should not include nonFTEU: %#v", phone)
+	}
+	if phoneBody["mode"] != "sms" {
+		t.Fatalf("mode = %#v, want sms", phoneBody["mode"])
+	}
+}
+
+func TestSubmitAppleAccountManage2FADefaultsTrustedDeviceAndUsesFreshScnt(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+
+	var authPaths []string
+	var submittedCode string
+	authTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authPaths = append(authPaths, r.Method+" "+r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/verify/trusteddevice/securitycode" {
+			t.Fatalf("unexpected auth request %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			SecurityCode struct {
+				Code string `json:"code"`
+			} `json:"securityCode"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		submittedCode = body.SecurityCode.Code
+		w.Header().Set("scnt", "fresh-scnt")
+		w.Header().Set("X-Apple-ID-Session-Id", "fresh-session")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer authTS.Close()
+
+	var managePaths []string
+	tokenCalls := 0
+	manageTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		managePaths = append(managePaths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /account/manage/gs/ws/token":
+			tokenCalls++
+			if tokenCalls != 1 {
+				t.Fatalf("unexpected token call %d", tokenCalls)
+			}
+			if r.Header.Get("scnt") != "fresh-scnt" {
+				t.Fatalf("token scnt header = %q, want fresh-scnt", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "token-scnt")
+			http.SetCookie(w, &http.Cookie{Name: "manage-token", Value: "ok", Path: "/"})
+			_, _ = w.Write([]byte(`{"timeOutInterval":15}`))
+		case "GET /account/manage":
+			if r.Header.Get("scnt") != "token-scnt" {
+				t.Fatalf("manage scnt header = %q, want token-scnt", r.Header.Get("scnt"))
+			}
+			if !strings.Contains(r.Header.Get("Cookie"), "manage-token=ok") {
+				t.Fatalf("manage cookie header = %q, want token response cookie", r.Header.Get("Cookie"))
+			}
+			w.Header().Set("scnt", "manage-scnt")
+			_, _ = w.Write([]byte(`{"apiKey":"account-key"}`))
+		default:
+			t.Fatalf("unexpected manage request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer manageTS.Close()
+	appleAccountManageBaseURL = manageTS.URL
+
+	session := &appleAuthSession{
+		Endpoints: appleAuthEndpoints{
+			Home: "https://account.apple.com",
+			Auth: authTS.URL,
+			Host: "appleid.apple.com",
+		},
+		AppleID:    "user@example.com",
+		ClientID:   appleAccountManageOAuthClientID,
+		FrameID:    "unit",
+		UserAgent:  appleAccountManageUserAgent,
+		Scnt:       "old-scnt",
+		ManageScnt: "stale-manage-scnt",
+		SessionID:  "old-session",
+	}
+	client := &AppleAuthClient{httpClient: authTS.Client()}
+	icloudSession, err := client.SubmitAppleAccountManage2FA(t.Context(), appleAuthPending{Session: session}, "123456", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submittedCode != "123456" {
+		t.Fatalf("submitted code = %q, want 123456", submittedCode)
+	}
+	if strings.Join(authPaths, "\n") != "POST /verify/trusteddevice/securitycode" {
+		t.Fatalf("auth paths = %#v, want only trusted-device validation", authPaths)
+	}
+	wantManagePaths := []string{
+		"GET /account/manage/gs/ws/token",
+		"GET /account/manage",
+	}
+	if strings.Join(managePaths, "\n") != strings.Join(wantManagePaths, "\n") {
+		t.Fatalf("manage paths = %#v, want %#v", managePaths, wantManagePaths)
+	}
+	state, ok := appleAccountLoginState(icloudSession)
+	if !ok || state.Scnt != "manage-scnt" || state.APIKey != "account-key" || state.SessionID != "fresh-session" {
+		t.Fatalf("apple account state = %+v ok=%v, want fresh session/scnt/api key", state, ok)
+	}
+}
+
+func TestAppleAuthClientValidatePhoneCodeUsesStoredPhoneNumber(t *testing.T) {
+	var body map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/verify/phone/securitycode" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer ts.Close()
+
+	session := &appleAuthSession{
+		Endpoints: appleAuthEndpoints{
+			Home: "https://account.apple.com",
+			Auth: ts.URL,
+		},
+		ClientID:       appleAccountManageOAuthClientID,
+		FrameID:        "unit",
+		UserAgent:      appleAccountManageUserAgent,
+		TwoFactorPhone: json.RawMessage(`{"id":4,"nonFTEU":true}`),
+	}
+	client := &AppleAuthClient{httpClient: ts.Client()}
+	if err := client.validatePhoneSecurityCode(t.Context(), session, "123456", nil); err != nil {
+		t.Fatal(err)
+	}
+	phone, ok := body["phoneNumber"].(map[string]any)
+	if !ok {
+		t.Fatalf("phoneNumber = %#v, want object", body["phoneNumber"])
+	}
+	if phone["id"] != float64(4) || phone["nonFTEU"] != true {
+		t.Fatalf("phoneNumber = %#v, want stored id and nonFTEU", phone)
+	}
+	securityCode := body["securityCode"].(map[string]any)
+	if securityCode["code"] != "123456" || body["mode"] != "sms" {
+		t.Fatalf("body = %#v, want code and sms mode", body)
+	}
+}
+
+func TestAppleAuthSessionRememberTwoFactorPhoneNumberFromAuthHTML(t *testing.T) {
+	session := &appleAuthSession{}
+	session.rememberTwoFactorPhoneNumber([]byte(`<html><script id="app_config" type="application/json">{"bootData":{"twoSV":{"trustedDeviceVerification":{"phoneNumberVerification":{"trustedPhoneNumbers":[{"id":7,"numberWithDialCode":"+1 ***"}]}}}}}</script></html>`))
+	if string(session.TwoFactorPhone) != `{"id":7}` {
+		t.Fatalf("TwoFactorPhone = %s, want id 7", session.TwoFactorPhone)
+	}
+}
+
+func TestICloudClientCreatePrivacyMailboxWithAppleAccountRefreshesAPIKey(t *testing.T) {
+	oldBaseURL := appleAccountManageBaseURL
+	defer func() { appleAccountManageBaseURL = oldBaseURL }()
+
+	var paths []string
+	tokenCalls := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case "GET /account/manage/gs/ws/token":
+			tokenCalls++
+			if tokenCalls != 1 {
+				t.Fatalf("unexpected token call %d", tokenCalls)
+			}
+			if r.Header.Get("scnt") != "scnt-token" {
+				t.Fatalf("token scnt header = %q, want scnt-token", r.Header.Get("scnt"))
+			}
+			w.Header().Set("scnt", "scnt-after-token")
+			http.SetCookie(w, &http.Cookie{Name: "token-cookie", Value: "ok", Path: "/"})
+			_, _ = w.Write([]byte(`{"timeOutInterval":15}`))
+		case "GET /account/manage":
+			if r.Header.Get("scnt") != "scnt-after-token" {
+				t.Fatalf("manage scnt header = %q, want scnt-after-token", r.Header.Get("scnt"))
+			}
+			if !strings.Contains(r.Header.Get("Cookie"), "token-cookie=ok") {
+				t.Fatalf("manage cookie header = %q, want token response cookie", r.Header.Get("Cookie"))
+			}
+			w.Header().Set("scnt", "scnt-after-manage")
+			http.SetCookie(w, &http.Cookie{Name: "manage-cookie", Value: "ok", Path: "/"})
+			_, _ = w.Write([]byte(`{"apiKey":"account-key"}`))
+		case "POST /account/manage/email/private/add":
+			if r.Header.Get("X-Apple-Api-Key") != "account-key" {
+				t.Fatalf("api key header = %q, want account-key", r.Header.Get("X-Apple-Api-Key"))
+			}
+			if r.Header.Get("scnt") != "scnt-after-manage" {
+				t.Fatalf("add scnt header = %q, want scnt-after-manage", r.Header.Get("scnt"))
+			}
+			if !strings.Contains(r.Header.Get("Cookie"), "manage-cookie=ok") {
+				t.Fatalf("add cookie header = %q, want manage response cookie", r.Header.Get("Cookie"))
+			}
+			_, _ = w.Write([]byte(`{"emailAddress":"Candidate.Alias@icloud.com","active":false}`))
+		case "PUT /account/manage/email/private/add/complete":
+			_, _ = w.Write([]byte(`{"emailAddress":"Candidate.Alias@icloud.com","id":"abc123","active":true}`))
+		case "GET /account/manage/email/private/abc123.em":
+			_, _ = w.Write([]byte(`{"emailAddress":"Candidate.Alias@icloud.com","id":"abc123","active":true}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer ts.Close()
+	appleAccountManageBaseURL = ts.URL
+
+	client := &ICloudClient{client: ts.Client()}
+	_, updatedSession, err := client.CreatePrivacyMailboxWithAppleAccount(t.Context(), ICloudSession{
+		LoginStates: []LoginState{{
+			Kind: LoginStateAppleAccount,
+			Scnt: "scnt-token",
+		}},
+	}, "", "LAB", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedState, ok := appleAccountLoginState(updatedSession)
+	if !ok || updatedState.APIKey != "account-key" {
+		t.Fatalf("updated apple account state = %+v ok=%v, want api key", updatedState, ok)
+	}
+	wantPaths := []string{
+		"GET /account/manage/gs/ws/token",
+		"GET /account/manage",
+		"POST /account/manage/email/private/add",
+		"PUT /account/manage/email/private/add/complete",
+		"GET /account/manage/email/private/abc123.em",
+	}
+	if strings.Join(paths, "\n") != strings.Join(wantPaths, "\n") {
+		t.Fatalf("paths = %#v, want %#v", paths, wantPaths)
 	}
 }
 
@@ -1721,6 +2329,58 @@ func TestSaveICloudSessionForOwnerKeepsMultipleAppleAccounts(t *testing.T) {
 	state := store.SnapshotForOwner(ownerID)
 	if len(state.Accounts) != 2 {
 		t.Fatalf("accounts = %d, want 2: %+v", len(state.Accounts), state.Accounts)
+	}
+}
+
+func TestSaveICloudSessionForOwnerMergesLoginStates(t *testing.T) {
+	store := newTestStore(t)
+	ownerID := "owner-merge"
+	icloudSession := ICloudSession{
+		OwnerID:            ownerID,
+		AppleID:            "same@example.com",
+		DSID:               "dsid-same",
+		ClientID:           "client",
+		PremiumMailBaseURL: "https://p-maildomainws.icloud.com",
+		Host:               "www.icloud.com",
+		IsICloudPlus:       true,
+		CanCreateHME:       true,
+		Cookies:            []SessionCookie{{Name: "icloud", Value: "ok", Domain: ".icloud.com", Path: "/"}},
+		LoginStates: []LoginState{{
+			Kind:    LoginStateICloudWeb,
+			Host:    "www.icloud.com",
+			Cookies: []SessionCookie{{Name: "icloud", Value: "ok", Domain: ".icloud.com", Path: "/"}},
+		}},
+	}
+	if err := store.SaveICloudSessionForOwner(ownerID, icloudSession); err != nil {
+		t.Fatal(err)
+	}
+	appleAccountSession := ICloudSession{
+		OwnerID: ownerID,
+		AppleID: "same@example.com",
+		LoginStates: []LoginState{{
+			Kind:   LoginStateAppleAccount,
+			Host:   "appleid.apple.com",
+			Scnt:   "scnt",
+			APIKey: "api-key",
+		}},
+	}
+	if err := store.SaveICloudSessionForOwner(ownerID, appleAccountSession); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions := store.ICloudSessionsForOwner(ownerID)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1: %+v", len(sessions), sessions)
+	}
+	got := sessions[0]
+	if got.DSID != icloudSession.DSID || got.PremiumMailBaseURL != icloudSession.PremiumMailBaseURL || len(got.Cookies) != 1 {
+		t.Fatalf("iCloud state was not preserved: %+v", got)
+	}
+	if _, ok := appleAccountLoginState(got); !ok {
+		t.Fatalf("apple account login state missing after merge: %+v", got.LoginStates)
+	}
+	if !hasLoginStateKind(got.LoginStates, LoginStateICloudWeb) {
+		t.Fatalf("iCloud login state missing after merge: %+v", got.LoginStates)
 	}
 }
 

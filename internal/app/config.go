@@ -9,26 +9,28 @@ import (
 )
 
 type Config struct {
-	ConfigPath        string `json:"-"`
-	Host              string `json:"host"`
-	Port              int    `json:"port"`
-	DataPath          string `json:"data_path"`
-	APIKey            string `json:"api_key"`
-	PublicBaseURL     string `json:"public_base_url"`
-	ICloudDefaultHost string `json:"icloud_default_host"`
-	ICloudClientID    string `json:"icloud_client_id"`
+	ConfigPath         string `json:"-"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	DataPath           string `json:"data_path"`
+	APIKey             string `json:"api_key"`
+	PublicBaseURL      string `json:"public_base_url"`
+	ICloudDefaultHost  string `json:"icloud_default_host"`
+	ICloudClientID     string `json:"icloud_client_id"`
+	AppleAccountAPIKey string `json:"apple_account_api_key"`
 }
 
 func LoadConfig(path string) (Config, error) {
 	cfg := Config{
-		ConfigPath:        path,
-		Host:              "127.0.0.1",
-		Port:              8787,
-		DataPath:          filepath.Join("data", "state.json"),
-		APIKey:            strings.TrimSpace(os.Getenv("IPM_API_KEY")),
-		PublicBaseURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("IPM_PUBLIC_BASE_URL")), "/"),
-		ICloudDefaultHost: "www.icloud.com.cn",
-		ICloudClientID:    defaultAppleOAuthClientID,
+		ConfigPath:         path,
+		Host:               "127.0.0.1",
+		Port:               8787,
+		DataPath:           filepath.Join("data", "state.json"),
+		APIKey:             strings.TrimSpace(os.Getenv("IPM_API_KEY")),
+		PublicBaseURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("IPM_PUBLIC_BASE_URL")), "/"),
+		ICloudDefaultHost:  "www.icloud.com.cn",
+		ICloudClientID:     defaultAppleOAuthClientID,
+		AppleAccountAPIKey: strings.TrimSpace(os.Getenv("IPM_APPLE_ACCOUNT_API_KEY")),
 	}
 	if path == "" {
 		return cfg, nil
@@ -64,6 +66,9 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if strings.TrimSpace(fromFile.ICloudClientID) != "" {
 		cfg.ICloudClientID = strings.TrimSpace(fromFile.ICloudClientID)
+	}
+	if strings.TrimSpace(fromFile.AppleAccountAPIKey) != "" {
+		cfg.AppleAccountAPIKey = strings.TrimSpace(fromFile.AppleAccountAPIKey)
 	}
 	return cfg, nil
 }

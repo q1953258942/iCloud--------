@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -51,6 +52,93 @@ func NewICloudClient() *ICloudClient {
 
 const mailboxSyncCursorOverlap = 2 * time.Minute
 
+var appleAccountManageBaseURL = "https://appleid.apple.com"
+
+const (
+	appleAccountManageOrigin     = "https://account.apple.com"
+	appleAccountManageUserAgent  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+	appleAccountManageRequestCtx = "ca"
+	appleAccountManageLanguage   = "en-US"
+	appleAccountManageTimeZone   = "America/Chicago"
+	appleAccountManageGMTOffset  = "GMT-05:00"
+	appleAccountManagePlatform   = `"macOS"`
+)
+
+func appleAccountManageHostForICloudHost(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if strings.Contains(host, "appleid.apple.com.cn") {
+		return "appleid.apple.com.cn"
+	}
+	return "appleid.apple.com"
+}
+
+func appleAccountManageOriginForHost(host string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if strings.Contains(host, "account.apple.com.cn") || strings.Contains(host, "appleid.apple.com.cn") {
+		return "https://account.apple.com.cn"
+	}
+	return appleAccountManageOrigin
+}
+
+func appleAccountManageBaseForState(state LoginState) string {
+	baseURL := strings.TrimSpace(appleAccountManageBaseURL)
+	if baseURL == "" {
+		baseURL = "https://appleid.apple.com"
+	}
+	if strings.TrimRight(baseURL, "/") != "https://appleid.apple.com" {
+		return baseURL
+	}
+	host := strings.TrimSpace(state.Host)
+	if host == "" {
+		return baseURL
+	}
+	host = strings.TrimPrefix(host, "https://")
+	host = strings.TrimPrefix(host, "http://")
+	host = strings.Trim(host, "/")
+	if host == "" {
+		return baseURL
+	}
+	return "https://" + host
+}
+
+func appleAccountPortalBaseForState(state LoginState) string {
+	baseURL := strings.TrimSpace(appleAccountManageBaseURL)
+	if baseURL != "" && strings.TrimRight(baseURL, "/") != "https://appleid.apple.com" {
+		return baseURL
+	}
+	return strings.TrimRight(firstNonEmpty(state.Origin, appleAccountManageOriginForHost(state.Host), appleAccountManageOrigin), "/")
+}
+
+func appleAccountLoginState(session ICloudSession) (LoginState, bool) {
+	for _, state := range session.LoginStates {
+		if state.Kind != LoginStateAppleAccount {
+			continue
+		}
+		if strings.TrimSpace(state.Scnt) == "" {
+			continue
+		}
+		return state, true
+	}
+	return LoginState{}, false
+}
+
+func appleAccountManageReady(session ICloudSession) bool {
+	state, ok := appleAccountLoginState(session)
+	return ok && strings.TrimSpace(state.APIKey) != ""
+}
+
+func withAppleAccountLoginState(session ICloudSession, next LoginState) ICloudSession {
+	next.Kind = LoginStateAppleAccount
+	for i, state := range session.LoginStates {
+		if state.Kind == LoginStateAppleAccount {
+			session.LoginStates[i] = next
+			return session
+		}
+	}
+	session.LoginStates = append(session.LoginStates, next)
+	return session
+}
+
 func (c *ICloudClient) CreatePrivacyMailbox(ctx context.Context, session ICloudSession, label, note string) (ICloudRemoteMailbox, error) {
 	if strings.TrimSpace(session.PremiumMailBaseURL) == "" || strings.TrimSpace(session.DSID) == "" || len(session.Cookies) == 0 {
 		return ICloudRemoteMailbox{}, errCode("icloud_session_missing", "未保存 iCloud 登录态，请先协议登录", true)
@@ -68,6 +156,214 @@ func (c *ICloudClient) CreatePrivacyMailbox(ctx context.Context, session ICloudS
 		label = "UPI-" + time.Now().Format("0102-150405")
 	}
 	return c.reserve(ctx, session, generated, label, strings.TrimSpace(note))
+}
+
+func (c *ICloudClient) CreatePrivacyMailboxWithAppleAccount(ctx context.Context, session ICloudSession, fallbackAPIKey, label, note string) (ICloudRemoteMailbox, ICloudSession, error) {
+	loginState, ok := appleAccountLoginState(session)
+	if !ok {
+		return ICloudRemoteMailbox{}, session, errCode("apple_account_session_missing", "当前登录态缺少 Apple Account 管理态，请重新协议登录", true)
+	}
+	apiKey := strings.TrimSpace(firstNonEmpty(loginState.APIKey, fallbackAPIKey))
+	if apiKey == "" {
+		refreshed, err := c.RefreshAppleAccountManageState(ctx, loginState)
+		loginState = refreshed
+		session = withAppleAccountLoginState(session, loginState)
+		if err != nil {
+			return ICloudRemoteMailbox{}, session, err
+		}
+		apiKey = strings.TrimSpace(loginState.APIKey)
+	}
+	if apiKey == "" {
+		return ICloudRemoteMailbox{}, session, errCode("apple_account_api_key_missing", "Apple Account 管理态缺少 api_key，请重新完成 Apple Account 登录流程", true)
+	}
+	loginState.APIKey = apiKey
+	session = withAppleAccountLoginState(session, loginState)
+	label = strings.TrimSpace(label)
+	if label == "" {
+		label = "UPI-" + time.Now().Format("0102-150405")
+	}
+	note = strings.TrimSpace(note)
+
+	var generated struct {
+		EmailAddress string `json:"emailAddress"`
+	}
+	if err := c.callAppleAccount(ctx, &loginState, apiKey, http.MethodPost, "/account/manage/email/private/add", map[string]any{}, &generated); err != nil {
+		return ICloudRemoteMailbox{}, withAppleAccountLoginState(session, loginState), err
+	}
+	if strings.TrimSpace(generated.EmailAddress) == "" {
+		return ICloudRemoteMailbox{}, withAppleAccountLoginState(session, loginState), errCode("apple_account_generate_empty", "Apple Account 未返回候选隐私邮箱", true)
+	}
+
+	var completed struct {
+		EmailAddress string `json:"emailAddress"`
+		Label        string `json:"label"`
+		Note         string `json:"note"`
+		ID           string `json:"id"`
+		Active       bool   `json:"active"`
+	}
+	if err := c.callAppleAccount(ctx, &loginState, apiKey, http.MethodPut, "/account/manage/email/private/add/complete", map[string]string{
+		"emailAddress": generated.EmailAddress,
+		"label":        label,
+		"note":         note,
+	}, &completed); err != nil {
+		return ICloudRemoteMailbox{}, withAppleAccountLoginState(session, loginState), err
+	}
+
+	remote := ICloudRemoteMailbox{
+		AnonymousID: strings.TrimSpace(completed.ID),
+		Email:       strings.ToLower(strings.TrimSpace(firstNonEmpty(completed.EmailAddress, generated.EmailAddress))),
+		Label:       strings.TrimSpace(firstNonEmpty(completed.Label, label)),
+		Note:        strings.TrimSpace(firstNonEmpty(completed.Note, note, "created by Apple Account private email API")),
+		IsActive:    completed.Active,
+		Origin:      "APPLE_ACCOUNT",
+	}
+	if remote.AnonymousID != "" {
+		var confirmed struct {
+			EmailAddress   string `json:"emailAddress"`
+			Label          string `json:"label"`
+			Note           string `json:"note"`
+			ID             string `json:"id"`
+			ForwardToEmail string `json:"forwardToEmail"`
+			Active         bool   `json:"active"`
+		}
+		path := "/account/manage/email/private/" + url.PathEscape(remote.AnonymousID) + ".em"
+		if err := c.callAppleAccount(ctx, &loginState, apiKey, http.MethodGet, path, nil, &confirmed); err == nil {
+			remote.Email = strings.ToLower(strings.TrimSpace(firstNonEmpty(confirmed.EmailAddress, remote.Email)))
+			remote.Label = strings.TrimSpace(firstNonEmpty(confirmed.Label, remote.Label))
+			remote.Note = strings.TrimSpace(firstNonEmpty(confirmed.Note, remote.Note))
+			remote.ForwardToEmail = strings.TrimSpace(confirmed.ForwardToEmail)
+			remote.IsActive = confirmed.Active
+		}
+	}
+	session = withAppleAccountLoginState(session, loginState)
+	if remote.Email == "" {
+		return ICloudRemoteMailbox{}, session, errCode("apple_account_create_empty", "Apple Account 创建后未返回隐私邮箱", true)
+	}
+	return remote, session, nil
+}
+
+func (c *ICloudClient) RefreshAppleAccountManageState(ctx context.Context, loginState LoginState) (LoginState, error) {
+	if strings.TrimSpace(loginState.Scnt) == "" {
+		return loginState, errCode("apple_account_session_missing", "当前登录态缺少 Apple Account 管理态，请重新协议登录", true)
+	}
+	var token struct {
+		TimeOutInterval int `json:"timeOutInterval"`
+	}
+	if err := c.callAppleAccount(ctx, &loginState, "", http.MethodGet, "/account/manage/gs/ws/token", nil, &token); err != nil {
+		return loginState, err
+	}
+	tokenScnt := strings.TrimSpace(loginState.Scnt)
+	if err := c.loadAppleAccountManageAPIKey(ctx, &loginState); err == nil {
+		return loginState, nil
+	}
+	if err := c.warmAppleAccountPortal(ctx, &loginState); err != nil {
+		return loginState, err
+	}
+	withoutScnt := loginState
+	withoutScnt.Scnt = ""
+	if err := c.callAppleAccount(ctx, &withoutScnt, "", http.MethodGet, "/account/manage/gs/ws/token", nil, &token); err == nil {
+		loginState = withoutScnt
+	} else if err := c.callAppleAccount(ctx, &loginState, "", http.MethodGet, "/account/manage/gs/ws/token", nil, &token); err != nil {
+		if tokenScnt == "" {
+			return loginState, err
+		}
+		loginState.Scnt = tokenScnt
+		if retryErr := c.callAppleAccount(ctx, &loginState, "", http.MethodGet, "/account/manage/gs/ws/token", nil, &token); retryErr != nil {
+			return loginState, err
+		}
+	}
+	if err := c.loadAppleAccountManageAPIKey(ctx, &loginState); err != nil {
+		return loginState, err
+	}
+	return loginState, nil
+}
+
+func (c *ICloudClient) loadAppleAccountManageAPIKey(ctx context.Context, loginState *LoginState) error {
+	var manage struct {
+		APIKey string `json:"apiKey"`
+	}
+	if err := c.callAppleAccount(ctx, loginState, "", http.MethodGet, "/account/manage", nil, &manage); err != nil {
+		return err
+	}
+	if apiKey := strings.TrimSpace(manage.APIKey); apiKey != "" {
+		loginState.APIKey = apiKey
+	}
+	if strings.TrimSpace(loginState.APIKey) == "" {
+		return errCode("apple_account_api_key_missing", "Apple Account 管理接口未返回 api_key，请重新完成 Apple Account 登录流程", true)
+	}
+	return nil
+}
+
+func (c *ICloudClient) warmAppleAccountPortal(ctx context.Context, loginState *LoginState) error {
+	if err := c.callAppleAccountPortal(ctx, loginState, "/account/manage/section/privacy", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7", false, "document", "navigate"); err != nil {
+		return err
+	}
+	return c.callAppleAccountPortal(ctx, loginState, "/bootstrap/portal", "application/json, text/plain, */*", true, "empty", "cors")
+}
+
+func (c *ICloudClient) callAppleAccountPortal(ctx context.Context, loginState *LoginState, path, accept string, jsonContent bool, secFetchDest, secFetchMode string) error {
+	if loginState == nil {
+		return errCode("apple_account_session_missing", "当前登录态缺少 Apple Account 管理态，请重新协议登录", true)
+	}
+	base, err := url.Parse(strings.TrimRight(appleAccountPortalBaseForState(*loginState), "/") + "/")
+	if err != nil {
+		return err
+	}
+	rel := &url.URL{Path: strings.TrimLeft(path, "/")}
+	rawURL := base.ResolveReference(rel).String()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	userAgent := firstNonEmpty(loginState.UserAgent, appleAccountManageUserAgent)
+	req.Header.Set("Accept", accept)
+	if jsonContent {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Referer", strings.TrimRight(firstNonEmpty(loginState.Origin, appleAccountManageOrigin), "/")+"/")
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept-Language", appleAccountManageLanguage+",en;q=0.9")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Mode", secFetchMode)
+	req.Header.Set("Sec-Fetch-Dest", secFetchDest)
+	req.Header.Set("Sec-CH-UA-Platform", appleAccountManagePlatform)
+	req.Header.Set("Sec-CH-UA", `"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"`)
+	req.Header.Set("Sec-CH-UA-Mobile", "?0")
+	if cookie := cookieHeader(loginState.Cookies, rawURL); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	if jsonContent {
+		req.Header.Set("X-Apple-I-Request-Context", appleAccountManageRequestCtx)
+		req.Header.Set("X-Apple-I-TimeZone", appleAccountManageTimeZone)
+		req.Header.Set("X-Apple-I-FD-Client-Info", appleAccountFDClientInfo(userAgent))
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return err
+	}
+	mergeSessionCookies(&loginState.Cookies, resp.Request.URL, resp.Cookies())
+	updateAppleAccountLoginStateFromHeaders(loginState, resp.Header)
+	if os.Getenv("IPM_DEBUG_APPLE_ACCOUNT") == "1" {
+		fmt.Fprintf(os.Stderr, "APPLE_ACCOUNT_PORTAL_DEBUG method=GET path=%s status=%d req_cookie_len=%d req_scnt=%s res_scnt=%s res_session=%s set_cookie=%d body=%q\n",
+			path,
+			resp.StatusCode,
+			len(req.Header.Get("Cookie")),
+			appleDebugFingerprint(req.Header.Get("scnt")),
+			appleDebugFingerprint(resp.Header.Get("scnt")),
+			appleDebugFingerprint(resp.Header.Get("X-Apple-ID-Session-Id")),
+			len(resp.Cookies()),
+			appleDebugBody(data),
+		)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return appleAccountAPIError(resp.StatusCode, data)
+	}
+	return nil
 }
 
 func (c *ICloudClient) ListPrivacyMailboxes(ctx context.Context, session ICloudSession) ([]ICloudRemoteMailbox, error) {
@@ -148,6 +444,292 @@ func (c *ICloudClient) reserve(ctx context.Context, session ICloudSession, hme, 
 		ForwardToEmail: out.HME.ForwardToEmail,
 		IsActive:       out.HME.IsActive,
 	}, nil
+}
+
+func (c *ICloudClient) callAppleAccount(ctx context.Context, loginState *LoginState, apiKey, method, path string, body any, result any) error {
+	if loginState == nil {
+		return errCode("apple_account_session_missing", "当前登录态缺少 Apple Account 管理态，请重新协议登录", true)
+	}
+	base, err := url.Parse(strings.TrimRight(appleAccountManageBaseForState(*loginState), "/") + "/")
+	if err != nil {
+		return err
+	}
+	rel := &url.URL{Path: strings.TrimLeft(path, "/")}
+	rawURL := base.ResolveReference(rel).String()
+
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, reader)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Content-Type", "application/json")
+	origin := strings.TrimRight(firstNonEmpty(loginState.Origin, appleAccountManageOriginForHost(loginState.Host), appleAccountManageOrigin), "/")
+	userAgent := firstNonEmpty(loginState.UserAgent, appleAccountManageUserAgent)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept-Language", appleAccountManageLanguage+",en;q=0.9")
+	req.Header.Set("Sec-Fetch-Site", "same-site")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-CH-UA-Platform", appleAccountManagePlatform)
+	req.Header.Set("Sec-CH-UA", `"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"`)
+	req.Header.Set("Sec-CH-UA-Mobile", "?0")
+	if scnt := strings.TrimSpace(loginState.Scnt); scnt != "" {
+		req.Header.Set("scnt", scnt)
+	}
+	if apiKey = strings.TrimSpace(apiKey); apiKey != "" {
+		req.Header.Set("X-Apple-Api-Key", apiKey)
+	}
+	req.Header.Set("X-Apple-I-FD-Client-Info", appleAccountFDClientInfo(userAgent))
+	req.Header.Set("X-Apple-I-Request-Context", appleAccountManageRequestCtx)
+	req.Header.Set("X-Apple-I-TimeZone", appleAccountManageTimeZone)
+	if cookie := cookieHeader(loginState.Cookies, rawURL); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return err
+	}
+	mergeSessionCookies(&loginState.Cookies, resp.Request.URL, resp.Cookies())
+	updateAppleAccountLoginStateFromHeaders(loginState, resp.Header)
+	if os.Getenv("IPM_DEBUG_APPLE_ACCOUNT") == "1" {
+		fmt.Fprintf(os.Stderr, "APPLE_ACCOUNT_DEBUG method=%s path=%s status=%d req_cookie_len=%d req_scnt=%s res_scnt=%s res_session=%s set_cookie=%d body=%q\n",
+			method,
+			path,
+			resp.StatusCode,
+			len(req.Header.Get("Cookie")),
+			appleDebugFingerprint(req.Header.Get("scnt")),
+			appleDebugFingerprint(resp.Header.Get("scnt")),
+			appleDebugFingerprint(resp.Header.Get("X-Apple-ID-Session-Id")),
+			len(resp.Cookies()),
+			appleDebugBody(data),
+		)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if os.Getenv("IPM_DEBUG_APPLE_ACCOUNT") == "1" {
+			fmt.Fprintf(os.Stderr, "APPLE_ACCOUNT_DEBUG method=%s path=%s status=%d body=%q\n", method, path, resp.StatusCode, appleDebugBody(data))
+		}
+		return appleAccountAPIError(resp.StatusCode, data)
+	}
+	if result != nil && len(bytes.TrimSpace(data)) > 0 {
+		if err := json.Unmarshal(data, result); err != nil {
+			return errCode("apple_account_bad_response", "Apple Account 返回无法解析", true)
+		}
+	}
+	return nil
+}
+
+func updateAppleAccountLoginStateFromHeaders(loginState *LoginState, header http.Header) {
+	if loginState == nil {
+		return
+	}
+	if scnt := strings.TrimSpace(header.Get("scnt")); scnt != "" {
+		loginState.Scnt = scnt
+	}
+	if sessionID := strings.TrimSpace(header.Get("X-Apple-ID-Session-Id")); sessionID != "" {
+		loginState.SessionID = sessionID
+	}
+	if token := strings.TrimSpace(firstNonEmpty(header.Get("X-Apple-I-DA-Token"), header.Get("X-Apple-I-Cont-X-Apple-I-DA-Token"))); token != "" {
+		loginState.DataAccessToken = token
+	}
+	loginState.SavedAt = time.Now()
+}
+
+func appleAccountFDClientInfo(userAgent string) string {
+	info := map[string]string{
+		"U": firstNonEmpty(userAgent, appleAccountManageUserAgent),
+		"L": appleAccountManageLanguage,
+		"Z": appleAccountManageGMTOffset,
+		"V": "1.1",
+		"F": appleAccountCompressedFingerprint(time.Now()),
+	}
+	data, _ := json.Marshal(info)
+	return string(data)
+}
+
+func appleAccountCompressedFingerprint(now time.Time) string {
+	raw := appleAccountFingerprintPayload(now.In(time.FixedZone("apple-account", -5*60*60)))
+	replaced := raw
+	for idx, token := range appleAccountFingerprintDictionary {
+		replaced = strings.ReplaceAll(replaced, token, string(rune(idx+1)))
+	}
+	encoded, ok := appleAccountFingerprintHuffman(replaced)
+	if !ok {
+		return raw
+	}
+	checksum := 65535
+	for _, b := range []byte(raw) {
+		checksum = ((checksum >> 8) | (checksum << 8)) & 0xffff
+		checksum ^= int(b) & 0xff
+		checksum ^= (checksum & 0xff) >> 4
+		checksum ^= (checksum << 12) & 0xffff
+		checksum ^= ((checksum & 0xff) << 5) & 0xffff
+	}
+	return encoded +
+		string(appleAccountFingerprintAlphabet[(checksum>>12)&63]) +
+		string(appleAccountFingerprintAlphabet[(checksum>>6)&63]) +
+		string(appleAccountFingerprintAlphabet[checksum&63])
+}
+
+func appleAccountFingerprintPayload(now time.Time) string {
+	values := []string{
+		"TF1", "020",
+	}
+	for i := 0; i < 39; i++ {
+		values = append(values, "")
+	}
+	values = append(values,
+		"true",
+		"true",
+		strconv.FormatInt(now.UnixMilli(), 10),
+		"-6",
+		"6/7/2005, 9:33:44 PM",
+		"", "", "", "", "", "",
+		strconv.FormatInt(now.UnixMilli(), 10),
+		"0",
+		appleAccountUSLocaleString(now),
+	)
+	for i := 0; i < 34; i++ {
+		values = append(values, "")
+	}
+	values = append(values, "5.6.1-0", "")
+
+	var b strings.Builder
+	for _, value := range values {
+		b.WriteString(appleAccountJSEscape(value))
+		b.WriteByte(';')
+	}
+	return b.String()
+}
+
+func appleAccountUSLocaleString(t time.Time) string {
+	hour := t.Hour()
+	ampm := "AM"
+	if hour >= 12 {
+		ampm = "PM"
+	}
+	hour12 := hour % 12
+	if hour12 == 0 {
+		hour12 = 12
+	}
+	return fmt.Sprintf("%d/%d/%d, %d:%02d:%02d %s", int(t.Month()), t.Day(), t.Year(), hour12, t.Minute(), t.Second(), ampm)
+}
+
+func appleAccountJSEscape(value string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for _, r := range value {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') ||
+			r == '@' || r == '*' || r == '_' || r == '+' || r == '-' || r == '.' || r == '/' {
+			b.WriteRune(r)
+			continue
+		}
+		if r <= 0xff {
+			b.WriteByte('%')
+			b.WriteByte(hex[(r>>4)&0xf])
+			b.WriteByte(hex[r&0xf])
+			continue
+		}
+		b.WriteString("%u")
+		b.WriteByte(hex[(r>>12)&0xf])
+		b.WriteByte(hex[(r>>8)&0xf])
+		b.WriteByte(hex[(r>>4)&0xf])
+		b.WriteByte(hex[r&0xf])
+	}
+	return b.String()
+}
+
+func appleAccountFingerprintHuffman(value string) (string, bool) {
+	var b strings.Builder
+	bitBuffer := 0
+	bitCount := 0
+	push := func(width, code int) {
+		bitBuffer = (bitBuffer << width) | code
+		bitCount += width
+		for bitCount >= 6 {
+			idx := (bitBuffer >> (bitCount - 6)) & 63
+			b.WriteByte(appleAccountFingerprintAlphabet[idx])
+			bitCount -= 6
+			bitBuffer ^= idx << bitCount
+		}
+	}
+	push(6, (len(value)&7)<<3)
+	push(6, (len(value)&56)|1)
+	for _, r := range value {
+		code, ok := appleAccountFingerprintCodes[int(r)]
+		if !ok {
+			return "", false
+		}
+		push(code.width, code.value)
+	}
+	code := appleAccountFingerprintCodes[0]
+	push(code.width, code.value)
+	if bitCount > 0 {
+		push(6-bitCount, 0)
+	}
+	return b.String(), true
+}
+
+type appleAccountFingerprintCode struct {
+	width int
+	value int
+}
+
+var appleAccountFingerprintDictionary = []string{
+	"%20", ";;;", "%3B", "%2C", "und", "fin", "ed;", "%28", "%29", "%3A", "/53", "ike", "Web", "0;", ".0", "e;", "on", "il", "ck", "01", "in", "Mo", "fa", "00", "32", "la", ".1", "ri", "it", "%u", "le",
+}
+
+const appleAccountFingerprintAlphabet = ".0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
+
+var appleAccountFingerprintCodes = map[int]appleAccountFingerprintCode{
+	1: {4, 15}, 110: {8, 239}, 74: {8, 238}, 57: {7, 118}, 56: {7, 117}, 71: {8, 233},
+	25: {8, 232}, 101: {5, 28}, 104: {7, 111}, 4: {7, 110}, 105: {6, 54}, 5: {7, 107},
+	109: {7, 106}, 103: {9, 423}, 82: {9, 422}, 26: {8, 210}, 6: {7, 104}, 46: {6, 51},
+	97: {6, 50}, 111: {6, 49}, 7: {7, 97}, 45: {7, 96}, 59: {5, 23}, 15: {7, 91},
+	11: {8, 181}, 72: {8, 180}, 27: {8, 179}, 28: {8, 178}, 16: {7, 88}, 88: {10, 703},
+	113: {11, 1405}, 89: {12, 2809}, 107: {13, 5617}, 90: {14, 11233}, 42: {15, 22465},
+	64: {16, 44929}, 0: {16, 44928}, 81: {9, 350}, 29: {8, 174}, 118: {8, 173}, 30: {8, 172},
+	98: {8, 171}, 12: {8, 170}, 99: {7, 84}, 117: {6, 41}, 112: {6, 40}, 102: {9, 319},
+	68: {9, 318}, 31: {8, 158}, 100: {7, 78}, 84: {6, 38}, 55: {6, 37}, 17: {7, 73},
+	8: {7, 72}, 9: {7, 71}, 77: {7, 70}, 18: {7, 69}, 65: {7, 68}, 48: {6, 33},
+	116: {6, 32}, 10: {7, 63}, 121: {8, 125}, 78: {8, 124}, 80: {7, 61}, 69: {7, 60},
+	119: {7, 59}, 13: {8, 117}, 79: {8, 116}, 19: {7, 57}, 67: {7, 56}, 114: {6, 27},
+	83: {6, 26}, 115: {6, 25}, 14: {6, 24}, 122: {8, 95}, 95: {8, 94}, 76: {7, 46},
+	24: {7, 45}, 37: {7, 44}, 50: {5, 10}, 51: {5, 9}, 108: {6, 17}, 22: {7, 33},
+	120: {8, 65}, 66: {8, 64}, 21: {7, 31}, 106: {7, 30}, 47: {6, 14}, 53: {5, 6},
+	49: {5, 5}, 86: {8, 39}, 85: {8, 38}, 23: {7, 18}, 75: {7, 17}, 20: {7, 16},
+	2: {5, 3}, 73: {8, 23}, 43: {9, 45}, 87: {9, 44}, 70: {7, 10}, 3: {6, 4},
+	52: {5, 1}, 54: {5, 0},
+}
+
+func appleAccountAPIError(status int, data []byte) error {
+	msg := strings.TrimSpace(trimForError(data))
+	if msg == "" {
+		msg = fmt.Sprintf("Apple Account HTTP %d", status)
+	}
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "limit") || strings.Contains(lower, "too many") || strings.Contains(lower, "rate") {
+		return errCode("apple_account_hme_limit", "Apple Account 已达到当前隐私邮箱创建上限，请稍后再试", true)
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return errCode("apple_account_auth_failed", "Apple Account 管理态已失效，请重新协议登录", true)
+	}
+	return errCode("apple_account_api_failed", msg, true)
 }
 
 func (c *ICloudClient) call(ctx context.Context, session ICloudSession, method, path string, body any, result any) error {
@@ -1222,6 +1804,48 @@ func cookieHeader(cookies []SessionCookie, rawURL string) string {
 	return strings.Join(out, "; ")
 }
 
+func mergeSessionCookies(cookies *[]SessionCookie, requestURL *url.URL, setCookies []*http.Cookie) {
+	if cookies == nil {
+		return
+	}
+	for _, c := range setCookies {
+		domain := strings.TrimSpace(c.Domain)
+		if domain == "" && requestURL != nil {
+			domain = requestURL.Hostname()
+		}
+		path := c.Path
+		if path == "" {
+			path = "/"
+		}
+		next := SessionCookie{
+			Name:     c.Name,
+			Value:    c.Value,
+			Domain:   domain,
+			Path:     path,
+			Secure:   c.Secure,
+			HTTPOnly: c.HttpOnly,
+		}
+		if !c.Expires.IsZero() {
+			next.Expires = float64(c.Expires.Unix())
+		}
+		replaced := false
+		for i, old := range *cookies {
+			if old.Name == next.Name && strings.EqualFold(strings.TrimPrefix(old.Domain, "."), strings.TrimPrefix(next.Domain, ".")) && old.Path == next.Path {
+				if next.Value == "" {
+					*cookies = append((*cookies)[:i], (*cookies)[i+1:]...)
+				} else {
+					(*cookies)[i] = next
+				}
+				replaced = true
+				break
+			}
+		}
+		if !replaced && next.Value != "" {
+			*cookies = append(*cookies, next)
+		}
+	}
+}
+
 func preferredICloudCookieOrder(name string) int {
 	for i, candidate := range preferredICloudCookies {
 		if candidate == "X_APPLE_WEB_KB-" && strings.HasPrefix(name, candidate) {
@@ -1269,6 +1893,57 @@ func trimForError(data []byte) string {
 		return text[:240] + "..."
 	}
 	return text
+}
+
+func appleDebugBody(data []byte) string {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return ""
+	}
+	var value any
+	if err := json.Unmarshal(trimmed, &value); err == nil {
+		redacted := redactAppleDebugJSON(value)
+		var buf bytes.Buffer
+		encoder := json.NewEncoder(&buf)
+		encoder.SetEscapeHTML(false)
+		if err := encoder.Encode(redacted); err == nil {
+			return trimForError(bytes.TrimSpace(buf.Bytes()))
+		}
+	}
+	return trimForError(trimmed)
+}
+
+func redactAppleDebugJSON(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			if appleDebugSecretKey(key) {
+				out[key] = "<redacted>"
+				continue
+			}
+			out[key] = redactAppleDebugJSON(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = redactAppleDebugJSON(item)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func appleDebugSecretKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for _, marker := range []string{"apikey", "api_key", "token", "secret", "password", "scnt", "session", "email", "accountname", "appleid", "dsid"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func setICloudFetchHeaders(req *http.Request, session ICloudSession, accept, contentType string) {

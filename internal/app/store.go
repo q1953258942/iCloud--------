@@ -518,12 +518,19 @@ func (s *FileStore) SaveICloudSessionForOwner(ownerID string, session ICloudSess
 		}
 		for i, existing := range s.state.ICloudSessions {
 			if constantTimeEqual(ownerID, existing.OwnerID) && sameICloudSessionIdentity(existing, session) {
-				s.state.ICloudSessions[i] = session
+				merged := mergeICloudSession(existing, session)
+				s.state.ICloudSessions[i] = merged
+				if strings.TrimSpace(merged.AccountID) != "" {
+					s.touchICloudAccountLocked(ownerID, merged.AccountID, merged)
+				}
 				return s.saveLocked()
 			}
 		}
 		s.state.ICloudSessions = append(s.state.ICloudSessions, session)
 		return s.saveLocked()
+	}
+	if s.state.ICloudSession != nil && sameICloudSessionIdentity(*s.state.ICloudSession, session) {
+		session = mergeICloudSession(*s.state.ICloudSession, session)
 	}
 	s.state.ICloudSession = &session
 	return s.saveLocked()
@@ -968,6 +975,72 @@ func cloneState(in State) State {
 func cloneICloudSession(in ICloudSession) ICloudSession {
 	out := in
 	out.Cookies = append([]SessionCookie(nil), in.Cookies...)
+	out.LoginStates = cloneLoginStates(in.LoginStates)
+	return out
+}
+
+func mergeICloudSession(existing, incoming ICloudSession) ICloudSession {
+	out := incoming
+	out.OwnerID = firstNonEmpty(incoming.OwnerID, existing.OwnerID)
+	out.AccountID = firstNonEmpty(incoming.AccountID, existing.AccountID)
+	if out.SavedAt.IsZero() {
+		out.SavedAt = existing.SavedAt
+	}
+	out.AppleID = firstNonEmpty(incoming.AppleID, existing.AppleID)
+	out.DSID = firstNonEmpty(incoming.DSID, existing.DSID)
+	out.ClientID = firstNonEmpty(incoming.ClientID, existing.ClientID)
+	out.ClientBuildNumber = firstNonEmpty(incoming.ClientBuildNumber, existing.ClientBuildNumber)
+	out.MasteringNumber = firstNonEmpty(incoming.MasteringNumber, existing.MasteringNumber)
+	out.PremiumMailBaseURL = firstNonEmpty(incoming.PremiumMailBaseURL, existing.PremiumMailBaseURL)
+	out.MailGatewayBaseURL = firstNonEmpty(incoming.MailGatewayBaseURL, existing.MailGatewayBaseURL)
+	out.MailBaseURL = firstNonEmpty(incoming.MailBaseURL, existing.MailBaseURL)
+	out.Host = firstNonEmpty(incoming.Host, existing.Host)
+	out.IsICloudPlus = incoming.IsICloudPlus || existing.IsICloudPlus
+	out.CanCreateHME = incoming.CanCreateHME || existing.CanCreateHME
+	if len(out.Cookies) == 0 {
+		out.Cookies = append([]SessionCookie(nil), existing.Cookies...)
+	}
+	out.LoginStates = mergeLoginStates(existing.LoginStates, incoming.LoginStates)
+	out.Note = firstNonEmpty(incoming.Note, existing.Note)
+	if out.LastCheckedAt.IsZero() {
+		out.LastCheckedAt = existing.LastCheckedAt
+	}
+	if !incoming.LastCheckOK {
+		out.LastCheckOK = existing.LastCheckOK
+	}
+	out.LastStatusMessage = firstNonEmpty(incoming.LastStatusMessage, existing.LastStatusMessage)
+	return out
+}
+
+func mergeLoginStates(existing, incoming []LoginState) []LoginState {
+	out := cloneLoginStates(existing)
+	for _, state := range incoming {
+		replaced := false
+		for i, current := range out {
+			if current.Kind == state.Kind {
+				next := state
+				next.Cookies = append([]SessionCookie(nil), state.Cookies...)
+				out[i] = next
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			next := state
+			next.Cookies = append([]SessionCookie(nil), state.Cookies...)
+			out = append(out, next)
+		}
+	}
+	return out
+}
+
+func cloneLoginStates(in []LoginState) []LoginState {
+	out := make([]LoginState, 0, len(in))
+	for _, state := range in {
+		next := state
+		next.Cookies = append([]SessionCookie(nil), state.Cookies...)
+		out = append(out, next)
+	}
 	return out
 }
 

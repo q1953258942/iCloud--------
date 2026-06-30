@@ -42,6 +42,16 @@ captures/
 config.json
 ```
 
+## Apple Account 协议排障约定
+
+新版 Apple Account 管理态登录/隐私邮箱创建协议，只以本机 Roxy 浏览器实操链路作为一手证据。
+
+排查时必须使用用户指定的 Roxy 窗口，通过 CDP 重新打开目标页面、实际登录、提交 2FA，并记录本次请求顺序、method/path、状态码、关键响应头指纹和脱敏请求体。`C:\Users\Administrator\Desktop\*.har` 等用户历史抓包只能作为背景材料；除非用户明确要求，不得作为实现依据，不得用它覆盖 Roxy 实操结论。
+
+涉及验证码/2FA 时，禁止同时触发多种发码方式；默认使用 `signin/complete` 自动下发的受信任设备验证码，不额外重发、不自动切短信。提交验证码时只按本次实际发码方式验证。
+
+证据记录禁止保存或输出完整 Cookie、scnt、session、API key、密码、验证码。
+
 ## 配置
 
 复制配置模板：
@@ -118,12 +128,31 @@ http://127.0.0.1:8787/login
 
 同一平台账号可以保存多个 Apple 登录态。保存成功后会生成一个内部 `account_id`，后续创建、同步、导出都会用这个 `account_id` 绑定数据；前端会用 TAB 展示不同 Apple 账号，避免多个账号的邮箱混在一起。
 
-### 2. 创建隐私邮箱
+### 2. Apple Account 管理态登录（新接口）
+
+这是正式面板功能，不是 live 测试专用代码。它用于保存 Apple Account 管理态登录态，后续创建 Hide My Email 时走 `account/manage/email/private/*` 新接口。
+
+1. 进入首页，在 `保存登录态` 输入 Apple ID 和密码。
+2. 点击 `管理态登录`。
+3. Apple 返回需要 2FA 时，默认等待受信任设备验证码；收到 6 位验证码后填入面板。
+4. 点击 `提交管理态 2FA`。
+5. 后端会保存独立的 Apple Account 管理态，包含 `scnt`、管理接口 Cookie、动态 `apiKey` 等必要字段。
+
+管理态和旧 iCloud Web 登录态分别保存在同一个 Apple 账号记录的 `login_states` 中：
+
+- `icloud_web`：旧 Hide My Email/iCloud 邮件接口使用，每小时约 5 个创建额度。
+- `apple_account`：Apple Account 管理接口使用，每小时约 20 个创建额度。
+
+创建邮箱时，后端会优先使用 `apple_account` 管理态的新接口；如果账号只有旧 `icloud_web` 登录态，则仍可按旧接口创建。两种登录态互不覆盖，账号数据、邮箱归属和 API 地址仍沿用原来的保存方式。
+
+排障时可使用 `IPM_DEBUG_APPLE_ACCOUNT=1` 查看脱敏后的请求摘要。日志只输出 method/path、状态码、Cookie 长度和响应头指纹；响应体中的 API key、token、session、账号和邮箱字段会被脱敏，不输出完整 Cookie、`scnt`、密码或验证码。
+
+### 3. 创建隐私邮箱
 
 1. 登录态保存成功后，在 `协议创建邮箱` 区域填写标签、备注、总数、并发和创建间隔秒。
 2. 选择要使用的 Apple 登录态 TAB。
 3. 点击创建。
-4. 后端调用 iCloud Hide My Email 接口创建邮箱，并写入服务器状态文件。
+4. 后端优先调用 Apple Account 管理接口创建邮箱；没有管理态时回退旧 iCloud Hide My Email 接口。
 5. 每个邮箱会生成独立 API 地址和 `mailbox_key`。
 
 默认创建间隔为 `30` 秒；批量时即使设置并发，也会在前端按全局间隔节流，保证两次创建请求之间至少等待配置的秒数。建议先用 `总数=1，并发=1` 验证账号权限，再按 `30-60` 秒间隔慢速创建，避免 iCloud 临时限流。
@@ -136,7 +165,7 @@ http://127.0.0.1:8787/login
 
 如果从 iCloud 同步已有 Hide My Email 地址，后端会按当前登录态写入对应 `account_id`，不会再放到“未绑定 Apple 账号”分组。
 
-### 3. 同步邮件和取验证码
+### 4. 同步邮件和取验证码
 
 - 面板可手动点击 `同步邮件`。
 - 对外取码 API 会先尝试同步 iCloud 最新邮件，再从本地状态中提取最新 6 位验证码。
