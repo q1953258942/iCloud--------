@@ -1289,6 +1289,7 @@
     let schedulerPollTimer = null;
     let manageRefreshClockTimer = null;
     let manageRefreshStatusInFlight = false;
+    const manageRefreshAutoIntervalMs = 3000;
     const manageRefreshStatusRequested = new Set();
     let lastSchedulerCreatedEventID = 0;
     let createAccountSelectionTouched = false;
@@ -1642,7 +1643,7 @@
             manageRefreshStatusInFlight = false;
             updateManageRefreshClocks();
           });
-      }, 300);
+      }, manageRefreshAutoIntervalMs);
     }
 
     function appleAccountNeedsRefreshTimeRetry(session) {
@@ -1658,7 +1659,7 @@
     }
 
     function waitForManageRefreshRetryDelay() {
-      return new Promise(resolve => setTimeout(resolve, 1200));
+      return new Promise(resolve => setTimeout(resolve, manageRefreshAutoIntervalMs));
     }
 
     function sessionManageRefreshBadge(session) {
