@@ -2347,6 +2347,19 @@ func TestSaveICloudIMAPLoginMatchesAppleSecondaryEmailPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	accountID := store.ICloudSessionsForOwner(user.ID)[0].AccountID
+	if err := store.SaveICloudSessionForOwner(user.ID, ICloudSession{
+		OwnerID: user.ID,
+		AppleID: "qq1953258942@gmail.com",
+		LoginStates: []LoginState{{
+			Kind:   LoginStateAppleAccount,
+			Host:   "appleid.apple.com",
+			Origin: "https://account.apple.com",
+			APIKey: "api-key",
+			Scnt:   "scnt",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/icloud/imap-login/save", strings.NewReader(`{"email":"q1953258942@icloud.com","app_password":"app-secret"}`))
@@ -2357,13 +2370,20 @@ func TestSaveICloudIMAPLoginMatchesAppleSecondaryEmailPrefix(t *testing.T) {
 		t.Fatalf("save imap prefix alias status = %d body=%s", rr.Code, rr.Body.String())
 	}
 	sessions := store.ICloudSessionsForOwner(user.ID)
-	if len(sessions) != 1 {
-		t.Fatalf("sessions len = %d, want 1: %+v", len(sessions), sessions)
+	if len(sessions) != 2 {
+		t.Fatalf("sessions len = %d, want 2: %+v", len(sessions), sessions)
 	}
-	if sessions[0].AccountID != accountID || sessions[0].AppleID != primaryAppleID {
-		t.Fatalf("stored session identity = %+v", sessions[0])
+	var matched ICloudSession
+	for _, session := range sessions {
+		if session.AccountID == accountID {
+			matched = session
+			break
+		}
 	}
-	state, ok := iCloudIMAPLoginState(sessions[0])
+	if matched.AccountID != accountID || matched.AppleID != primaryAppleID {
+		t.Fatalf("stored session identity = %+v", matched)
+	}
+	state, ok := iCloudIMAPLoginState(matched)
 	if !ok || state.IMAPEmail != "q1953258942@icloud.com" {
 		t.Fatalf("stored imap state = %+v ok=%v", state, ok)
 	}

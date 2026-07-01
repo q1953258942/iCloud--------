@@ -1184,7 +1184,7 @@ func emailLocalPartsMatch(accountLocal, imapLocal string, allowAppleSecondaryPre
 	if !allowAppleSecondaryPrefix {
 		return false
 	}
-	return "q"+accountLocal == imapLocal || "q"+imapLocal == accountLocal
+	return "q"+accountLocal == imapLocal
 }
 
 func (s *Server) sessionForOwnerIMAPEmail(ownerID, email string) (ICloudSession, bool) {
