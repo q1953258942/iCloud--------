@@ -1147,13 +1147,20 @@ func (s *Server) sessionForOwnerCreateEmailLocalPart(ownerID, email string) (ICl
 	if local == "" {
 		return ICloudSession{}, false
 	}
+	if match, ok := s.sessionForOwnerCreateEmailLocalPartMatch(ownerID, local, false); ok {
+		return match, true
+	}
+	return s.sessionForOwnerCreateEmailLocalPartMatch(ownerID, local, true)
+}
+
+func (s *Server) sessionForOwnerCreateEmailLocalPartMatch(ownerID, local string, allowAppleSecondaryPrefix bool) (ICloudSession, bool) {
 	var match ICloudSession
 	found := false
 	for _, session := range s.sessionsForOwner(ownerID, "") {
 		if !appleAccountLoginSaved(session) && !iCloudWebLoginSaved(session) {
 			continue
 		}
-		if !strings.EqualFold(emailLocalPart(session.AppleID), local) {
+		if !emailLocalPartsMatch(emailLocalPart(session.AppleID), local, allowAppleSecondaryPrefix) {
 			continue
 		}
 		if found && !sameICloudSessionPublicIdentity(match, session) {
@@ -1163,6 +1170,21 @@ func (s *Server) sessionForOwnerCreateEmailLocalPart(ownerID, email string) (ICl
 		found = true
 	}
 	return match, found
+}
+
+func emailLocalPartsMatch(accountLocal, imapLocal string, allowAppleSecondaryPrefix bool) bool {
+	accountLocal = strings.ToLower(strings.TrimSpace(accountLocal))
+	imapLocal = strings.ToLower(strings.TrimSpace(imapLocal))
+	if accountLocal == "" || imapLocal == "" {
+		return false
+	}
+	if accountLocal == imapLocal {
+		return true
+	}
+	if !allowAppleSecondaryPrefix {
+		return false
+	}
+	return "q"+accountLocal == imapLocal || "q"+imapLocal == accountLocal
 }
 
 func (s *Server) sessionForOwnerIMAPEmail(ownerID, email string) (ICloudSession, bool) {
