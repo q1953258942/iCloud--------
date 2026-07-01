@@ -499,40 +499,48 @@
     .pager button { padding: 8px 11px; border-radius: 8px; }
     .page-size-control { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
     .page-size-control input { width: 76px; padding: 8px 10px; }
-    .code-result-panel {
-      margin: 0 18px 12px;
-      padding: 12px;
+    .mailbox-code-cell {
+      min-width: 150px;
+      max-width: 220px;
+    }
+    .mailbox-code-empty {
+      color: var(--faint);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .code-inline-result {
+      display: inline-grid;
+      gap: 3px;
+      min-width: 118px;
+      max-width: 100%;
+      padding: 7px 10px;
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: rgb(var(--surface-rgb) / .72);
+      background: rgb(var(--surface-rgb) / .76);
+      color: var(--muted);
+      text-align: left;
+      overflow-wrap: anywhere;
+      white-space: normal;
+      vertical-align: middle;
     }
-    .code-result-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: center;
-      margin-bottom: 10px;
+    button.code-inline-result {
+      cursor: pointer;
+      border-color: var(--ok-line);
+      background: var(--ok-soft);
     }
-    .code-result-list { display: grid; gap: 8px; }
-    .code-result-item {
-      display: grid;
-      grid-template-columns: minmax(180px, 1fr) auto;
-      gap: 10px;
-      align-items: center;
-      padding: 10px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: rgb(var(--surface-rgb) / .82);
+    .code-inline-result.loading { white-space: nowrap; }
+    .code-inline-result.error {
+      border-color: var(--warn-line);
+      background: var(--warn-soft);
+      color: var(--warn);
     }
-    .code-result-main { min-width: 0; }
-    .code-result-main strong, .code-result-main span { display: block; overflow-wrap: anywhere; }
     .code-value {
+      display: block;
       font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
       font-size: 18px;
       letter-spacing: 0;
       color: var(--green-2);
     }
-    .code-result-status { justify-self: end; white-space: nowrap; }
     .spinner {
       width: 13px;
       height: 13px;
@@ -1217,17 +1225,10 @@
               <button id="mailboxNextPage" onclick="changeMailboxPage(1)">下一页</button>
             </div>
           </div>
-          <div id="mailboxCodePanel" class="code-result-panel" hidden>
-            <div class="code-result-head">
-              <strong>验证码结果</strong>
-              <span class="muted">点击已收到的验证码即可复制。</span>
-            </div>
-            <div id="mailboxCodeResults" class="code-result-list"></div>
-          </div>
           <div id="mailboxAccountTabs" class="account-tabs"></div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>标签</th><th>邮箱</th><th>状态</th><th>收件</th><th>API</th><th>操作</th></tr></thead>
+              <thead><tr><th>标签</th><th>邮箱</th><th>状态</th><th>收件</th><th>API</th><th>验证码</th><th>操作</th></tr></thead>
               <tbody id="mailboxes"></tbody>
             </table>
           </div>
@@ -2382,15 +2383,14 @@
       if ($('mailboxPrevPage')) $('mailboxPrevPage').disabled = page <= 1;
       if ($('mailboxNextPage')) $('mailboxNextPage').disabled = page >= totalPages;
       if (rows.length === 0) {
-        $('mailboxes').innerHTML = '<tr><td colspan="6" class="muted">没有匹配的邮箱</td></tr>';
-        renderMailboxCodeResults();
+        $('mailboxes').innerHTML = '<tr><td colspan="7" class="muted">没有匹配的邮箱</td></tr>';
         return;
       }
       let lastGroup = '';
       $('mailboxes').innerHTML = rows.map(row => {
         const group = mailboxAccountTitle(row);
         const groupRow = group !== lastGroup
-          ? `<tr class="account-group"><td colspan="6">Apple 账号：${esc(group)}</td></tr>`
+          ? `<tr class="account-group"><td colspan="7">Apple 账号：${esc(group)}</td></tr>`
           : '';
         lastGroup = group;
         return `${groupRow}
@@ -2404,6 +2404,7 @@
             </td>
             <td>${row.receive_count || 0}</td>
             <td><span class="muted token-mask">${esc(row.api_token_mask || '')}</span></td>
+            <td class="mailbox-code-cell">${renderMailboxCodeCell(row.id)}</td>
             <td><div class="row-actions">
               <button onclick="copyAPI('${row.id}')">API 地址</button>
               <button id="verifyButton-${esc(row.id)}" onclick="verifyMailbox('${row.id}')">${verifyButtonText(row.id)}</button>
@@ -2422,7 +2423,6 @@
             </td>
           </tr>`;
       }).join('');
-      renderMailboxCodeResults();
     }
 
     function mailboxAccountTitle(row) {
@@ -2437,36 +2437,20 @@
       return '验证码';
     }
 
-    function renderMailboxCodeResults() {
-      const panel = $('mailboxCodePanel');
-      const list = $('mailboxCodeResults');
-      if (!panel || !list) return;
-      const items = [...mailboxCodeResults.entries()].slice(-12).reverse();
-      panel.hidden = items.length === 0;
-      if (items.length === 0) {
-        list.innerHTML = '';
-        return;
+    function renderMailboxCodeCell(id) {
+      const item = mailboxCodeResults.get(id);
+      if (!item) return '<span class="mailbox-code-empty">未读取</span>';
+      const time = item.time ? ` · ${esc(item.time)}` : '';
+      if (item.loading) {
+        return '<span class="code-inline-result loading"><span><span class="spinner"></span>读取中</span></span>';
       }
-      list.innerHTML = items.map(([id, item]) => {
-        const email = item.email || id;
-        const time = item.time ? ` · ${esc(item.time)}` : '';
-        if (item.loading) {
-          return `<div class="code-result-item">
-            <div class="code-result-main"><strong>${esc(email)}</strong><span class="muted">正在读取最新验证码...</span></div>
-            <span class="pill code-result-status"><span class="spinner"></span>读取中</span>
-          </div>`;
-        }
-        if (item.code) {
-          return `<button type="button" class="code-result-item" onclick="copyMailboxCode('${esc(id)}')">
-            <div class="code-result-main"><strong>${esc(email)}</strong><span class="code-value">${esc(item.code)}</span></div>
-            <span class="pill code-result-status">点击复制${time}</span>
-          </button>`;
-        }
-        return `<div class="code-result-item">
-          <div class="code-result-main"><strong>${esc(email)}</strong><span class="muted">${esc(item.message || '暂未收到验证码')}</span></div>
-          <span class="pill off code-result-status">未取到${time}</span>
-        </div>`;
-      }).join('');
+      if (item.code) {
+        return `<button type="button" class="code-inline-result" onclick="copyMailboxCode('${esc(id)}')" title="点击复制验证码">
+          <span class="code-value">${esc(item.code)}</span>
+          <span class="muted">点击复制${time}</span>
+        </button>`;
+      }
+      return `<span class="code-inline-result error">${esc(item.message || '暂未收到验证码')}${time}</span>`;
     }
 
     async function copyMailboxCode(id) {
@@ -2827,7 +2811,6 @@
       const row = lastMailboxes.find(x => x.id === id);
       if (!row) return;
       mailboxCodeResults.set(id, {email: row.email, loading: true});
-      renderMailboxCodeResults();
       renderMailboxes();
       try {
         const url = mailboxCodeURL(row, {
@@ -2847,7 +2830,6 @@
         mailboxCodeResults.set(id, {email: row.email, message: err.message, time: new Date().toLocaleTimeString()});
         log('取码失败：' + err.message);
       } finally {
-        renderMailboxCodeResults();
         renderMailboxes();
       }
     }
