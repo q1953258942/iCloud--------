@@ -123,7 +123,7 @@ Copy-Item .\config.example.json .\config.json
 }
 ```
 
-Linux 服务器建议使用 systemd 托管并设置 `Restart=always`。在线更新替换二进制后会退出当前进程，交给 systemd 自动拉起新版。Windows 运行中的 exe 不支持安全自替换，面板只提供检测，不执行在线替换。
+Linux 服务器建议使用 systemd 托管并设置 `Restart=on-failure` 或 `Restart=always`。在线更新替换二进制后会用非 0 退出码结束当前进程，交给 systemd 自动拉起新版。Windows 运行中的 exe 不支持安全自替换，面板只提供检测，不执行在线替换。
 
 ## 本地运行
 

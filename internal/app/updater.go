@@ -227,7 +227,7 @@ func (s *Server) applyUpdate(ctx context.Context) (publicUpdateStatus, error) {
 	candidate.Status.CheckedAt = formatTime(time.Now())
 	go func() {
 		time.Sleep(1200 * time.Millisecond)
-		os.Exit(0)
+		os.Exit(2)
 	}()
 	return candidate.Status, nil
 }
